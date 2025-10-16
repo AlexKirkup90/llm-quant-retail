@@ -69,6 +69,9 @@ class WalkForwardBacktester:
         overlay_trace: Dict[str, Dict[str, float]] = {}
         overlay_scalers: Dict[pd.Timestamp, float] = {}
         beta_history: Dict[pd.Timestamp, float] = {}
+        ic_trace: Dict[pd.Timestamp, float] = {}
+        hit_trace: Dict[pd.Timestamp, float] = {}
+        regime_trace: Dict[pd.Timestamp, Dict[str, float]] = {}
 
         gross_returns: List[pd.Series] = []
         net_returns: List[pd.Series] = []
@@ -143,6 +146,23 @@ class WalkForwardBacktester:
             equity_curve = equity_curve.reindex(equity_curve.index.union(cumulative.index))
             equity_curve.update(cumulative * equity_curve.iloc[-1])
 
+            last_period = period_returns.iloc[-1]
+            ic_val = metrics.spearman_ic(weights, last_period)
+            hit_val = metrics.hit_rate(weights, last_period)
+            ic_trace[start] = float(ic_val) if pd.notna(ic_val) else float("nan")
+            hit_trace[start] = float(hit_val) if pd.notna(hit_val) else float("nan")
+            regime_trace[start] = {"trend": 1.0, "mean_reversion": 0.0}
+            if pd.notna(ic_val) or pd.notna(hit_val):
+                metrics.append_ic_metric(
+                    {
+                        "date": start.isoformat(),
+                        "ic": float(ic_val) if pd.notna(ic_val) else float("nan"),
+                        "hit_rate": float(hit_val) if pd.notna(hit_val) else float("nan"),
+                        "universe": self.config.universe,
+                        "benchmark": self.config.benchmark,
+                    }
+                )
+
             prev_weights = weights
 
         if not gross_returns:
@@ -182,6 +202,9 @@ class WalkForwardBacktester:
             "overlays": overlay_trace,
             "overlay_scalers": pd.Series(overlay_scalers).sort_index(),
             "portfolio_beta": pd.Series(beta_history).sort_index(),
+            "ic": pd.Series(ic_trace).sort_index(),
+            "hit_rate": pd.Series(hit_trace).sort_index(),
+            "regime_blend": regime_trace,
         }
 
         if log:

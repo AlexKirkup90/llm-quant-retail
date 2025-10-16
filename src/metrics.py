@@ -1,7 +1,13 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
 from typing import Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
+
+from .config import RUNS_DIR
 
 
 def equity_curve(weights_hist: pd.DataFrame, returns: pd.DataFrame) -> pd.Series:
@@ -140,3 +146,115 @@ def val_metrics(
         "val_sortino": float(np.nanmean(sortinos)),
         "val_alpha": float(np.nanmean(alphas)) if alphas else float("nan"),
     }
+
+
+def spearman_ic(predicted: pd.Series, future: pd.Series) -> float:
+    """Compute Spearman rank IC between predictions and future returns."""
+
+    if predicted is None or future is None:
+        return float("nan")
+    pred = pd.Series(predicted).astype(float)
+    fut = pd.Series(future).astype(float)
+    aligned_pred, aligned_fut = pred.align(fut, join="inner")
+    aligned_pred = aligned_pred.replace([np.inf, -np.inf], np.nan)
+    aligned_fut = aligned_fut.replace([np.inf, -np.inf], np.nan)
+    mask = aligned_pred.notna() & aligned_fut.notna()
+    if mask.sum() < 3:
+        return float("nan")
+    ranks_pred = aligned_pred[mask].rank(method="average")
+    ranks_fut = aligned_fut[mask].rank(method="average")
+    corr = ranks_pred.corr(ranks_fut)
+    return float(corr) if pd.notna(corr) else float("nan")
+
+
+def hit_rate(predicted: pd.Series, future: pd.Series, top_frac: float = 0.1) -> float:
+    """Return hit-rate of top predictions beating the median future return."""
+
+    if predicted is None or future is None:
+        return float("nan")
+    pred = pd.Series(predicted).astype(float)
+    fut = pd.Series(future).astype(float)
+    aligned_pred, aligned_fut = pred.align(fut, join="inner")
+    aligned_pred = aligned_pred.replace([np.inf, -np.inf], np.nan)
+    aligned_fut = aligned_fut.replace([np.inf, -np.inf], np.nan)
+    mask = aligned_pred.notna() & aligned_fut.notna()
+    if mask.sum() == 0:
+        return float("nan")
+    working_scores = aligned_pred[mask]
+    working_returns = aligned_fut[mask]
+    if working_scores.empty:
+        return float("nan")
+    frac = max(0.0, min(1.0, float(top_frac)))
+    top_n = max(1, int(round(len(working_scores) * frac)))
+    top_idx = working_scores.sort_values(ascending=False).head(top_n).index
+    median_ret = working_returns.median()
+    hits = (working_returns.loc[top_idx] > median_ret).mean()
+    return float(hits)
+
+
+def feature_ic_snapshot(features: pd.DataFrame, future_returns: pd.Series) -> pd.Series:
+    """Compute per-feature Spearman IC vs. future returns."""
+
+    if features is None or features.empty or future_returns is None:
+        return pd.Series(dtype=float)
+    fut = pd.Series(future_returns).astype(float)
+    ic_values: Dict[str, float] = {}
+    for column in features.columns:
+        values = features[column]
+        if not isinstance(values, pd.Series):
+            ic_values[column] = float("nan")
+            continue
+        aligned_vals, aligned_fut = values.align(fut, join="inner")
+        aligned_vals = aligned_vals.replace([np.inf, -np.inf], np.nan)
+        aligned_fut = aligned_fut.replace([np.inf, -np.inf], np.nan)
+        mask = aligned_vals.notna() & aligned_fut.notna()
+        if mask.sum() < 3:
+            ic_values[column] = float("nan")
+            continue
+        corr = aligned_vals[mask].rank(method="average").corr(
+            aligned_fut[mask].rank(method="average")
+        )
+        ic_values[column] = float(corr) if pd.notna(corr) else float("nan")
+    return pd.Series(ic_values).sort_index()
+
+
+def append_ic_metric(record: Dict[str, object], path: Path | None = None) -> None:
+    """Append IC metrics to runs/ic_history.json."""
+
+    if record is None:
+        return
+    target = Path(path) if path else RUNS_DIR / "ic_history.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    data: List[Dict[str, object]]
+    if target.exists():
+        try:
+            parsed = json.loads(target.read_text())
+            data = parsed if isinstance(parsed, list) else []
+        except Exception:
+            data = []
+    else:
+        data = []
+    data.append(record)
+    try:
+        target.write_text(json.dumps(data, indent=2))
+    except Exception:
+        pass
+
+
+def load_ic_history(path: Path | None = None) -> pd.DataFrame:
+    """Load IC history as DataFrame."""
+
+    target = Path(path) if path else RUNS_DIR / "ic_history.json"
+    if not target.exists():
+        return pd.DataFrame(columns=["date", "ic", "hit_rate", "universe", "benchmark"])
+    try:
+        parsed = json.loads(target.read_text())
+    except Exception:
+        return pd.DataFrame(columns=["date", "ic", "hit_rate", "universe", "benchmark"])
+    if not isinstance(parsed, list) or not parsed:
+        return pd.DataFrame(columns=["date", "ic", "hit_rate", "universe", "benchmark"])
+    df = pd.DataFrame(parsed)
+    if "date" in df.columns:
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+        df = df.dropna(subset=["date"])
+    return df.sort_values("date")

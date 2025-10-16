@@ -1,5 +1,6 @@
 import hashlib
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Sequence
 
 import pandas as pd
@@ -28,6 +29,66 @@ def cache_parquet(df: pd.DataFrame, name: str) -> str:
     path = CACHE_DIR / f"{name}.parquet"
     df.to_parquet(path)
     return str(path)
+
+
+REFERENCE_DIR = Path("data/reference")
+OHLCV_LATEST_PATH = REFERENCE_DIR / "ohlcv_latest.csv"
+
+
+def load_latest_ohlcv_snapshot() -> pd.DataFrame:
+    """Return the most recent OHLCV snapshot if available."""
+
+    if not OHLCV_LATEST_PATH.exists():
+        return pd.DataFrame(columns=["symbol", "close"])
+    try:
+        df = pd.read_csv(OHLCV_LATEST_PATH)
+    except Exception:
+        return pd.DataFrame(columns=["symbol", "close"])
+    if "symbol" not in df.columns:
+        return pd.DataFrame(columns=["symbol", "close"])
+    df["symbol"] = df["symbol"].astype(str).str.upper().str.strip()
+    df = df.drop_duplicates(subset=["symbol"]).reset_index(drop=True)
+    return df
+
+
+def ohlcv_snapshot_coverage(snapshot: pd.DataFrame, symbols: Sequence[str]) -> float:
+    """Return coverage ratio of snapshot symbols vs requested universe."""
+
+    if snapshot is None or snapshot.empty or not symbols:
+        return 0.0
+    requested = {str(sym).upper().strip() for sym in symbols if sym}
+    if not requested:
+        return 0.0
+    available = set(snapshot.get("symbol", pd.Series(dtype=str)))
+    if not available:
+        return 0.0
+    covered = len(requested & {str(sym).upper().strip() for sym in available})
+    return covered / max(1, len(requested))
+
+
+def write_latest_ohlcv_snapshot(prices: pd.DataFrame) -> None:
+    """Persist the latest OHLCV row for quick warm-cache detection."""
+
+    if prices is None or prices.empty:
+        return
+    REFERENCE_DIR.mkdir(parents=True, exist_ok=True)
+    working = prices.ffill().tail(1)
+    if working.empty:
+        return
+    latest = working.iloc[0]
+    if isinstance(latest, pd.Series):
+        payload = latest.dropna().rename("close").to_frame().reset_index()
+        payload.columns = ["symbol", "close"]
+    else:
+        payload = pd.DataFrame(columns=["symbol", "close"])
+    if payload.empty:
+        return
+    payload["symbol"] = payload["symbol"].astype(str).str.upper().str.strip()
+    payload = payload.drop_duplicates(subset=["symbol"]).sort_values("symbol")
+    try:
+        payload.to_csv(OHLCV_LATEST_PATH, index=False)
+    except Exception:
+        pass
 
 
 def has_warm_price_cache(name: str, min_constituents: int = 50) -> bool:

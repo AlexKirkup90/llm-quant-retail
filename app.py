@@ -3,7 +3,7 @@ import pathlib
 import sys
 from io import StringIO
 from pathlib import Path
-from typing import List, Sequence, Tuple
+from typing import Dict, List, Sequence, Tuple
 
 import pandas as pd
 
@@ -24,6 +24,25 @@ LABELS = {
     "NASDAQ_100": "NASDAQ-100",
     "FTSE_350": "FTSE 350",
 }
+
+BENCHMARK_BY_UNIVERSE = {
+    "SP500_FULL": "SPY",
+    "R1000": "SPY",
+    "NASDAQ_100": "QQQ",
+    "FTSE_350": "ISF.L",
+}
+
+BENCHMARK_LABELS = {
+    "SPY": "SPY",
+    "QQQ": "QQQ",
+    "ISF.L": "ISF.L",
+}
+
+
+def _resolve_benchmark(universe_name: str) -> Tuple[str, str]:
+    ticker = BENCHMARK_BY_UNIVERSE.get(universe_name, "SPY")
+    label = BENCHMARK_LABELS.get(ticker, ticker)
+    return ticker, label
 
 
 def get_universe_choices() -> List[str]:
@@ -103,7 +122,10 @@ def main():
         universe_selector,
         explain,
         risk,
+        regime,
     )
+    from src.features import velocity as feature_velocity
+    from src.signals import residuals as residual_signals
 
     if hasattr(st, "set_page_config"):
         st.set_page_config(page_title="LLM-Codex Quant — Weekly", layout="wide")
@@ -116,6 +138,13 @@ def main():
 
     def k(*parts: str) -> str:
         return "::".join(str(p) for p in parts)
+
+    signals_cfg: Dict[str, Dict[str, object]] = spec_data.get("signals", {}) or {}
+    velocity_cfg = signals_cfg.get("velocity", {}) or {}
+    residual_cfg = signals_cfg.get("residual_alpha", {}) or {}
+    adaptive_cfg = signals_cfg.get("adaptive_ic", {}) or {}
+    regime_cfg = signals_cfg.get("regime_blend", {}) or {}
+    evaluation_cfg = spec_data.get("evaluation", {}) or {}
 
     as_of = st.date_input("As-of date", value=date.today(), key=k("weekly", "as_of"))
 
@@ -159,6 +188,25 @@ def main():
         key=k("weekly", "bypass_cap"),
     )
 
+    turnover_cap_key = k("weekly", "turnover_cap")
+    rebalance_band_key = k("weekly", "rebalance_band")
+    turnover_cap = st.slider(
+        "Turnover cap (weekly)",
+        min_value=0.0,
+        max_value=1.0,
+        value=0.40,
+        step=0.01,
+        key=turnover_cap_key,
+    )
+    rebalance_band = st.slider(
+        "Rebalance band (fraction of target weight)",
+        min_value=0.0,
+        max_value=1.0,
+        value=0.25,
+        step=0.01,
+        key=rebalance_band_key,
+    )
+
     sector_neutral = st.checkbox(
         "Sector-neutral scoring",
         value=False,
@@ -170,6 +218,27 @@ def main():
         "Bandit selection (net alpha)",
         value=bandit_default,
         key=k("weekly", "bandit"),
+    )
+
+    enable_velocity = st.checkbox(
+        "Enable velocity features",
+        value=bool(velocity_cfg.get("enable", False)),
+        key=k("weekly", "velocity"),
+    )
+    enable_residual = st.checkbox(
+        "Use residual alpha",
+        value=bool(residual_cfg.get("enable", False)),
+        key=k("weekly", "residual_alpha"),
+    )
+    enable_adaptive_ic = st.checkbox(
+        "Adaptive weighting by IC",
+        value=bool(adaptive_cfg.get("enable", False)),
+        key=k("weekly", "adaptive_ic"),
+    )
+    enable_regime_blend = st.checkbox(
+        "Regime blend",
+        value=bool(regime_cfg.get("enable", False)),
+        key=k("weekly", "regime_blend"),
     )
 
     st.markdown(
@@ -266,6 +335,15 @@ def main():
                 .drop_duplicates()
                 .tolist()
             )
+            benchmark_symbol, benchmark_label = _resolve_benchmark(selected_universe_name)
+            if benchmark_symbol not in symbols:
+                symbols.append(benchmark_symbol)
+            sector_lookup = None
+            if "sector" in uni.columns:
+                with pd.option_context("mode.use_inf_as_na", True):
+                    sector_lookup = (
+                        uni.set_index("symbol")["sector"].astype(str).str.upper().replace("", pd.NA)
+                    )
             if not symbols:
                 st.error(f"No symbols resolved for universe {selected_universe_name}.")
                 st.stop()
@@ -280,23 +358,36 @@ def main():
             if filter_meta.get("reason"):
                 st.info(filter_meta.get("reason"))
 
-            if "SPY" not in symbols:
-                symbols.append("SPY")
-
             min_expected = universe_registry.expected_min_constituents(selected_universe_name)
             cache_key = _symbol_cache_key(selected_universe_name)
-            warm_cache = dataops.has_warm_price_cache(cache_key, min_expected)
+            warm_price_cache = dataops.has_warm_price_cache(cache_key, min_expected)
+
+            snapshot_df = dataops.load_latest_ohlcv_snapshot()
+            snapshot_coverage = dataops.ohlcv_snapshot_coverage(snapshot_df, symbols)
+            cache_warm_key = k("weekly", "cache_warm")
+            if snapshot_coverage >= 0.80:
+                st.session_state[cache_warm_key] = True
+                st.caption(
+                    f"OHLCV snapshot warm — coverage: {snapshot_coverage:.1%}"
+                )
+            cache_warm_flag = bool(st.session_state.get(cache_warm_key, False))
+
+            effective_warm = warm_price_cache or cache_warm_flag
             capped_symbols, effective_cap = _apply_runtime_cap(
                 symbols,
                 runtime_cap,
-                warm_cache,
+                effective_warm,
                 bypass_cap_if_cache_warm,
             )
             st.write(
                 f"Effective universe for data fetch: **{len(capped_symbols)}** "
                 f"(cap applied: {effective_cap if effective_cap else 'none'})"
             )
-            if warm_cache:
+            if cache_warm_flag and bypass_cap_if_cache_warm:
+                st.success(
+                    f"Full universe enabled (coverage: {snapshot_coverage:.1%})"
+                )
+            elif warm_price_cache:
                 st.success("Warm price cache detected.")
             if not capped_symbols:
                 st.error(f"No symbols resolved for universe {selected_universe_name}.")
@@ -306,11 +397,13 @@ def main():
             try:
                 prices = dataops.fetch_prices(capped_symbols, years=years)
                 dataops.cache_parquet(prices, cache_key)
+                dataops.write_latest_ohlcv_snapshot(prices)
             except Exception as exc:
                 st.warning(f"Price fetch failed ({exc}); generating fallback series.")
                 idx = pd.date_range(end=pd.Timestamp(as_of), periods=252 * 5, freq="B")
                 random_walk = np.cumprod(1 + np.random.randn(len(idx), len(capped_symbols)) * 0.001, axis=0)
                 prices = pd.DataFrame(random_walk, index=idx, columns=capped_symbols)
+                dataops.write_latest_ohlcv_snapshot(prices)
 
             if prices.empty:
                 st.error("No price data available after fetch.")
@@ -325,6 +418,9 @@ def main():
             feats = feats.fillna(0.0)
 
             returns = prices.pct_change().dropna(how="all")
+            bench_returns = returns.get(
+                benchmark_symbol, pd.Series(0.0, index=returns.index)
+            ).fillna(0.0)
             try:
                 fwd5 = (1 + returns).rolling(5, min_periods=5).apply(lambda x: x.prod() - 1).shift(-5)
                 fwd5 = fwd5.iloc[:-5] if len(fwd5) >= 5 else fwd5.iloc[0:0]
@@ -343,6 +439,44 @@ def main():
                 except Exception:
                     continue
 
+            velocity_panel = pd.DataFrame()
+            if enable_velocity and feature_history:
+                history_panel = pd.concat(
+                    {ts: df for ts, df in feature_history.items()},
+                    names=["date", "symbol"],
+                )
+                try:
+                    velocity_panel = feature_velocity.build_velocity_features(
+                        history_panel,
+                        velocity_cfg.get("windows", {}),
+                    )
+                except Exception:
+                    velocity_panel = pd.DataFrame()
+                if not velocity_panel.empty:
+                    for ts in list(feature_history.keys()):
+                        try:
+                            vel_snapshot = velocity_panel.xs(ts, level=0)
+                            feature_history[ts] = feature_history[ts].join(vel_snapshot, how="left")
+                        except Exception:
+                            continue
+                    try:
+                        latest_ts = sorted(feature_history.keys())[-1]
+                        feats = feats.join(velocity_panel.xs(latest_ts, level=0), how="left")
+                    except Exception:
+                        pass
+            feats = feats.fillna(0.0)
+
+            residual_target = None
+            if enable_residual:
+                try:
+                    residual_target = residual_signals.compute_residual_returns(
+                        returns,
+                        sector_lookup if sector_lookup is not None else None,
+                        bench_returns,
+                    )
+                except Exception:
+                    residual_target = None
+
             try:
                 w_ridge = signals.fit_rolling_ridge(fwd5, feature_history)
                 if w_ridge.empty:
@@ -351,20 +485,71 @@ def main():
             except Exception:
                 w_ridge = pd.Series(dtype=float)
 
-            sector_map = None
-            try:
-                sector_map = uni.set_index("symbol")["sector"].reindex(feats.index)
-            except Exception:
-                sector_map = None
+            if enable_residual and residual_target is not None and not residual_target.empty:
+                aligned_target = residual_target.reindex(feats.index).fillna(0.0)
+                if aligned_target.abs().sum() > 0:
+                    try:
+                        w_ridge = signals.fit_ridge(feats, aligned_target)
+                    except Exception:
+                        pass
+
+            feature_ic_snapshot = pd.Series(dtype=float)
+            if not fwd5.empty:
+                try:
+                    latest_target = fwd5.iloc[-1]
+                    feature_ic_snapshot = metrics.feature_ic_snapshot(feats, latest_target)
+                except Exception:
+                    feature_ic_snapshot = pd.Series(dtype=float)
+
+            ic_ema_series = None
+            if enable_adaptive_ic and not feature_ic_snapshot.empty:
+                existing_ic = signals.load_feature_ic_ema()
+                ic_ema_series = signals.update_feature_ic_ema(
+                    existing_ic,
+                    feature_ic_snapshot,
+                    ema_lambda=float(adaptive_cfg.get("ema_lambda", 0.9)),
+                )
+                signals.save_feature_ic_ema(ic_ema_series)
+                w_ridge = signals.apply_ic_weighting(
+                    w_ridge,
+                    ic_ema_series,
+                    alpha_ic=float(adaptive_cfg.get("alpha_ic", 0.2)),
+                    clip=float(adaptive_cfg.get("clip", 0.5)),
+                )
+            else:
+                ic_ema_series = signals.load_feature_ic_ema()
+
+            sector_series = None
+            if sector_lookup is not None:
+                try:
+                    sector_series = sector_lookup.reindex(feats.index)
+                except Exception:
+                    sector_series = None
 
             scores = signals.score_current(
                 feats,
                 w_ridge,
-                sector_map=sector_map,
+                sector_map=sector_series,
                 sector_neutral=sector_neutral,
             )
             if scores.empty:
                 scores = pd.Series(np.random.randn(len(feats.index)), index=feats.index)
+
+            ic_value = float("nan")
+            hit_value = float("nan")
+            if not fwd5.empty:
+                latest_target = fwd5.iloc[-1]
+                ic_value = metrics.spearman_ic(scores, latest_target)
+                hit_value = metrics.hit_rate(scores, latest_target)
+                if evaluation_cfg.get("track_ic", True) or evaluation_cfg.get("track_hit_rate", True):
+                    payload = {
+                        "date": str(as_of),
+                        "ic": float(ic_value) if pd.notna(ic_value) else float("nan"),
+                        "hit_rate": float(hit_value) if pd.notna(hit_value) else float("nan"),
+                        "universe": selected_universe_name,
+                        "benchmark": benchmark_symbol,
+                    }
+                    metrics.append_ic_metric(payload)
 
             st.subheader("Top candidates")
             st.dataframe(scores.head(20).to_frame("score"))
@@ -389,6 +574,21 @@ def main():
             else:
                 st.dataframe(shap_table)
 
+            ic_history_df = metrics.load_ic_history()
+            st.subheader("Rolling IC & hit-rate (26 weeks)")
+            if ic_history_df.empty:
+                st.info("No IC history recorded yet.")
+            else:
+                recent_hist = ic_history_df.tail(26).set_index("date")[["ic", "hit_rate"]]
+                st.line_chart(recent_hist)
+
+            st.subheader("Feature IC_EMA (top/bottom 5)")
+            if ic_ema_series is None or ic_ema_series.empty:
+                st.info("No IC_EMA values available.")
+            else:
+                ic_table = explain.ic_ema_table(ic_ema_series, top_n=5)
+                st.dataframe(ic_table)
+
             returns_252 = returns.tail(252)
             try:
                 w0 = portfolio.inverse_vol_weights(
@@ -401,9 +601,51 @@ def main():
                 w0 = pd.Series(1 / max(1, len(top_holdings)), index=top_holdings)
 
             try:
-                w_sector = portfolio.apply_sector_caps(w0, sector_map, cap=0.35) if sector_map is not None else w0
+                w_sector = (
+                    portfolio.apply_sector_caps(w0, sector_lookup, cap=0.35)
+                    if sector_lookup is not None
+                    else w0
+                )
             except Exception:
                 w_sector = w0
+
+            blend_meta = {}
+            if enable_regime_blend:
+                try:
+                    trend_series = (
+                        returns_252.reindex(columns=w_sector.index, fill_value=0.0)
+                        .mul(w_sector, axis=1)
+                        .sum(axis=1)
+                    )
+                    trend_perf = metrics.sharpe(trend_series, periods_per_year=252)
+                except Exception:
+                    trend_series = pd.Series(dtype=float)
+                    trend_perf = float("nan")
+
+                try:
+                    mr_candidates = scores.sort_values(ascending=True).head(len(w_sector))
+                    mr_weights = portfolio.inverse_vol_weights(
+                        returns_252,
+                        mr_candidates.index.tolist(),
+                        cap_single=0.10,
+                        k=min(15, len(mr_candidates)),
+                    )
+                    mr_series = (
+                        returns_252.reindex(columns=mr_weights.index, fill_value=0.0)
+                        .mul(mr_weights, axis=1)
+                        .sum(axis=1)
+                    )
+                    mr_perf = metrics.sharpe(mr_series, periods_per_year=252)
+                except Exception:
+                    mr_weights = w_sector
+                    mr_series = pd.Series(dtype=float)
+                    mr_perf = float("nan")
+
+                blend_meta = {"trend": float(trend_perf or 0.0), "mean_reversion": float(mr_perf or 0.0)}
+                try:
+                    w_sector = regime.blend_weights(w_sector, mr_weights, blend_meta)
+                except Exception:
+                    pass
 
             last = memory.load_last_portfolio()
             last_w = None
@@ -411,7 +653,12 @@ def main():
                 last_w = pd.Series({h["ticker"]: h["weight"] for h in last.get("holdings", [])})
 
             try:
-                w_final = portfolio.enforce_turnover(last_w, w_sector, t_cap=0.30)
+                w_final = portfolio.apply_turnover_controls(
+                    last_w,
+                    w_sector,
+                    turnover_cap=float(turnover_cap),
+                    rebalance_band=float(rebalance_band),
+                )
             except Exception:
                 w_final = w_sector
 
@@ -434,7 +681,9 @@ def main():
                 returns_252.reindex(columns=w_final.index, fill_value=0.0).mul(w_final, axis=1).sum(axis=1)
             )
             curve = (1 + port_rets).cumprod()
-            bench = returns_252.get("SPY", pd.Series(0.0, index=returns_252.index))
+            bench = returns_252.get(
+                benchmark_symbol, pd.Series(0.0, index=returns_252.index)
+            )
 
             sor = metrics.sortino(port_rets) if len(port_rets) else 0.0
             mdd = metrics.max_drawdown(curve) if len(curve) else 0.0
@@ -442,7 +691,9 @@ def main():
             net_alpha = alpha - 0.0005 * turnover_fraction
             cost_bps_weekly = float(0.0005 * turnover_fraction * 10000.0)
 
-            beta_series = risk.estimate_asset_betas(returns_252, benchmark_col="SPY")
+            beta_series = risk.estimate_asset_betas(
+                returns_252, benchmark_col=benchmark_symbol
+            )
             portfolio_beta = float((w_final * beta_series.reindex(w_final.index).fillna(0.0)).sum())
             vol_realised = risk.annualised_volatility(port_rets)
 
@@ -450,12 +701,12 @@ def main():
             st.write(
                 f"- Sortino: **{sor:.2f}**  \n"
                 f"- Max Drawdown: **{mdd:.2%}**  \n"
-                f"- Alpha vs SPY (weekly mean): **{alpha:.4%}**"
+                f"- Alpha vs {benchmark_label} (weekly mean): **{alpha:.4%}**"
             )
 
             st.subheader("Risk dashboard")
             beta_col, vol_col, dd_col, scaler_col = st.columns(4)
-            beta_col.metric("Beta vs SPY", f"{portfolio_beta:.2f}")
+            beta_col.metric(f"Beta vs {benchmark_label}", f"{portfolio_beta:.2f}")
             vol_col.metric("Realised vol", f"{vol_realised:.2%}" if pd.notna(vol_realised) else "n/a")
             dd_col.metric("Max drawdown", f"{mdd:.2%}")
             scaler_col.metric("Overlay scaler", "1.00")
@@ -478,9 +729,13 @@ def main():
                 "cost_bps_weekly": float(cost_bps_weekly),
                 "portfolio_beta": float(portfolio_beta),
                 "vol_realized": float(vol_realised) if pd.notna(vol_realised) else float("nan"),
+                "benchmark": benchmark_symbol,
                 "sector_neutral": bool(sector_neutral),
                 "bandit_mode": bool(bandit_enabled and bool(decision_info)),
                 "overlay_scaler": 1.0,
+                "regime_blend": blend_meta,
+                "ic": float(ic_value) if pd.notna(ic_value) else float("nan"),
+                "hit_rate": float(hit_value) if pd.notna(hit_value) else float("nan"),
             }
             summary_json = json.dumps(summary_payload, indent=2)
 
@@ -510,7 +765,7 @@ def main():
                 f"# Weekly AI Portfolio — {as_of}\n\n"
                 f"- Sortino: {sor:.2f}\n"
                 f"- Max Drawdown: {mdd:.2%}\n"
-                f"- Alpha (vs SPY, weekly mean): {alpha:.4%}\n"
+                f"- Alpha (vs {benchmark_label}, weekly mean): {alpha:.4%}\n"
             )
             out_path = report.write_markdown(note)
             with open(out_path, "rb") as handle:
@@ -522,6 +777,8 @@ def main():
                 )
 
             val_metrics = metrics.val_metrics(port_rets, bench)
+            coverage_universe = len([sym for sym in symbols if sym != benchmark_symbol])
+            coverage_ratio = float(coverage_universe / max(1, min_expected))
             metrics_record = {
                 "spec": spec_version,
                 "date": str(as_of),
@@ -530,16 +787,20 @@ def main():
                 "sortino": float(sor),
                 "mdd": float(mdd),
                 "hit_rate": float((port_rets > bench).mean()),
+                "ic": float(ic_value) if pd.notna(ic_value) else float("nan"),
+                "ic_hit_rate": float(hit_value) if pd.notna(hit_value) else float("nan"),
                 "val_sortino": float(val_metrics.get("val_sortino", float("nan"))),
                 "val_alpha": float(val_metrics.get("val_alpha", float("nan"))),
                 "universe": selected_universe_name,
-                "coverage": float(len(symbols) / max(1, min_expected)),
+                "coverage": coverage_ratio,
                 "turnover_cost": float(0.0005 * turnover_fraction if turnover_fraction else 0.0),
                 "total_cost": float(0.0005 * turnover_fraction),
                 "cost_bps_weekly": float(cost_bps_weekly),
                 "overlay_scaler": 1.0,
                 "sector_neutral": bool(sector_neutral),
                 "bandit_mode": bool(bandit_enabled and bool(decision_info)),
+                "benchmark": benchmark_symbol,
+                "regime_blend": blend_meta,
             }
             memory.append_metrics(metrics_record)
             st.success("Metrics logged to metrics_history.json")

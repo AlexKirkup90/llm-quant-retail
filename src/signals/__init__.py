@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 from sklearn.linear_model import Ridge
 
-from .config import RUNS_DIR
+from ..config import RUNS_DIR
 
 # ---------------------------------------------------------------------
 # v0.3 CONFIG BRIDGE
@@ -88,6 +88,8 @@ RIDGE_ALPHA: float = _cfg["ridge_alpha"]
 # Internal scaler maps (may be overridden by spec)
 _VOL_REGIME_SCALERS: Dict[str, Dict[str, float]] = _cfg["vol_scalers"]
 _MARKET_SENTIMENT_SCALERS: Dict[str, Dict[str, float]] = _cfg["sent_scalers"]
+
+_FEATURE_IC_EMA_PATH = RUNS_DIR / "feature_ic_ema.json"
 
 
 def get_learning_config() -> Dict[str, float | int]:
@@ -382,3 +384,78 @@ def score_current(
     X = working.fillna(0.0)
     s = X.dot(weights.loc[cols])
     return s.sort_values(ascending=False).rename("score")
+
+
+def load_feature_ic_ema() -> pd.Series:
+    """Load the persisted feature IC EMA series."""
+
+    if not _FEATURE_IC_EMA_PATH.exists():
+        return pd.Series(dtype=float)
+    try:
+        data = json.loads(_FEATURE_IC_EMA_PATH.read_text())
+    except Exception:
+        return pd.Series(dtype=float)
+    if isinstance(data, dict):
+        return pd.Series(data, dtype=float).sort_index()
+    return pd.Series(dtype=float)
+
+
+def save_feature_ic_ema(series: pd.Series) -> None:
+    """Persist feature IC EMA values to disk."""
+
+    if series is None or series.empty:
+        try:
+            if _FEATURE_IC_EMA_PATH.exists():
+                _FEATURE_IC_EMA_PATH.unlink()
+        except Exception:
+            pass
+        return
+    payload = {str(k): float(v) for k, v in series.items() if pd.notna(v)}
+    try:
+        _FEATURE_IC_EMA_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _FEATURE_IC_EMA_PATH.write_text(json.dumps(payload, indent=2))
+    except Exception:
+        pass
+
+
+def update_feature_ic_ema(
+    existing: pd.Series | None,
+    snapshot: pd.Series,
+    *,
+    ema_lambda: float = 0.9,
+) -> pd.Series:
+    """Blend new IC snapshot into an EMA."""
+
+    new_snapshot = pd.Series(snapshot).astype(float)
+    if existing is None or existing.empty:
+        return new_snapshot.fillna(0.0)
+    current = pd.Series(existing).astype(float)
+    union_index = current.index.union(new_snapshot.index)
+    current = current.reindex(union_index, fill_value=0.0)
+    new_snapshot = new_snapshot.reindex(union_index, fill_value=0.0)
+    lam = float(ema_lambda)
+    lam = max(0.0, min(0.999, lam))
+    blended = lam * current + (1 - lam) * new_snapshot
+    return blended
+
+
+def apply_ic_weighting(
+    weights: pd.Series,
+    ic_ema: pd.Series | None,
+    *,
+    alpha_ic: float = 0.2,
+    clip: float = 0.5,
+) -> pd.Series:
+    """Adjust weights based on IC EMA signal."""
+
+    if weights is None or weights.empty or ic_ema is None or ic_ema.empty:
+        return weights
+    w = pd.Series(weights).astype(float)
+    ic_series = pd.Series(ic_ema).astype(float)
+    ic_series = ic_series.reindex(w.index).fillna(0.0)
+    mult = 1.0 + float(alpha_ic) * ic_series
+    clip_val = abs(float(clip))
+    if clip_val > 0:
+        mult = mult.clip(lower=1.0 - clip_val, upper=1.0 + clip_val)
+    adjusted = w * mult
+    return _normalize_weights(adjusted)

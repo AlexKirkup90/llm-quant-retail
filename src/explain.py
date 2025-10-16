@@ -67,3 +67,17 @@ def shap_like_contributions(
     contributions = full_contrib.reindex(columns=display_cols)
     contributions["total_contribution"] = totals
     return contributions
+
+
+def ic_ema_table(ic_ema: pd.Series, top_n: int = 5) -> pd.DataFrame:
+    """Return a table of top and bottom feature IC_EMA values."""
+
+    series = _as_series(ic_ema).dropna()
+    if series.empty:
+        return pd.DataFrame(columns=["ic_ema", "group"])
+    top = series.nlargest(max(1, top_n))
+    bottom = series.nsmallest(max(1, top_n))
+    combined = pd.concat([top, bottom])
+    groups = ["top"] * len(top) + ["bottom"] * len(bottom)
+    table = pd.DataFrame({"ic_ema": combined.values, "group": groups}, index=combined.index)
+    return table
