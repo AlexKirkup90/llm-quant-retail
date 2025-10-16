@@ -1,1 +1,53 @@
-
+{
+  "version": "0.2",
+  "as_of": "2025-10-16",
+  "regime": "Moderate Risk-On / Easing Bias",
+  "max_update_per_feature": 0.1,
+  "features": {
+    "mom_6m": {
+      "description": "6-month total return momentum",
+      "weight": 0.10,
+      "source": "price"
+    },
+    "eps_rev_3m": {
+      "description": "3-month change in forward EPS consensus, standardized by sector",
+      "weight": 0.10,
+      "source": "fundamentals_stub"
+    },
+    "quality_roic": {
+      "description": "Return on invested capital, latest fiscal quarter",
+      "weight": 0.10,
+      "source": "fundamentals_stub"
+    },
+    "value_ey": {
+      "description": "Earnings yield (inverse PE), sector-neutral z-score",
+      "weight": 0.05,
+      "source": "fundamentals_stub"
+    },
+    "news_sent": {
+      "description": "7-day trailing mean news sentiment score, normalized −1…1",
+      "weight": 0.10,
+      "source": "sentiment_stub"
+    },
+    "risk_beta": {
+      "description": "Trailing 1-year market beta vs SPY",
+      "weight": -0.05,
+      "source": "price"
+    },
+    "liq_adv": {
+      "description": "log of 30-day average dollar volume, z-scored",
+      "weight": 0.10,
+      "source": "price"
+    },
+    "def_stability": {
+      "description": "inverse 90-day earnings volatility; higher = more stable",
+      "weight": 0.05,
+      "source": "fundamentals_stub"
+    }
+  },
+  "notes": [
+    "Risk-on regime favors momentum, EPS revision, and liquidity.",
+    "Moderate weights on quality and sentiment; slight penalty to beta.",
+    "New deterministic stubs to be added for EPS revisions and sentiment."
+  ]
+}
