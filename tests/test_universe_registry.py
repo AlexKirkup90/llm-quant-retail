@@ -47,11 +47,34 @@ def test_normalize_handles_integer_columns():
         }
     )
 
-    normalized = universe_registry._normalize_universe_df(raw, "SP500_FULL")
+    normalized = universe_registry._normalize_universe_df(raw, "R1000")
 
     assert len(normalized) == 3  # row with missing ticker dropped
     assert ptypes.is_string_dtype(normalized["symbol"])
     assert normalized["symbol"].equals(normalized["symbol"].str.upper())
+
+
+def test_provider_handles_integer_headers(tmp_path):
+    html = """
+    <table>
+        <thead>
+            <tr><th>0</th><th>1</th><th>2</th></tr>
+            <tr><th>Symbol</th><th>Company</th><th>Sector</th></tr>
+        </thead>
+        <tbody>
+            <tr><td>aapl</td><td>Apple Inc</td><td>Technology</td></tr>
+            <tr><td>msft</td><td>Microsoft</td><td>Technology</td></tr>
+        </tbody>
+    </table>
+    """
+    html_path = tmp_path / "nasdaq_inline.html"
+    html_path.write_text(html, encoding="utf-8")
+
+    df = universe_registry.fetch_nasdaq_100(html_path)
+
+    assert list(df.columns) == ["symbol", "name", "sector"]
+    assert df.loc[0, "symbol"] == "AAPL"
+    assert df.loc[1, "symbol"] == "MSFT"
 
 
 def test_refresh_writes_csvs(tmp_path, monkeypatch):

@@ -40,23 +40,30 @@ def main():
         st.json(results)
 
         row_counts = {}
+        symbol_samples = {}
         universes = getattr(universe_registry, "_UNIVERSES", {})
         for name, status in results.items():
             if isinstance(status, str) and status.lower().startswith("error:"):
-                st.error(f"{name}: {status}")
+                st.markdown(f"**{name}**")
+                st.error(status)
                 continue
             definition = universes.get(name)
             if not definition:
                 continue
             try:
-                df = pd.read_csv(definition.csv_path)
+                df = universe_registry.load_universe(name)
                 row_counts[name] = len(df)
+                symbol_samples[name] = df["symbol"].head(5).tolist()
             except Exception as exc:
-                st.warning(f"Unable to read cached CSV for {name}: {exc}")
+                st.markdown(f"**{name}**")
+                st.error(f"error: {exc}")
 
         if row_counts:
             st.write("Latest universe row counts:")
             st.json(row_counts)
+        if symbol_samples:
+            st.write("Sample symbols (first 5):")
+            st.json(symbol_samples)
 
     st.markdown(
         "This demo builds a simplified, AI-driven S&P 500 portfolio using "
