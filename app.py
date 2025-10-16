@@ -25,6 +25,9 @@ def main():
     import pandas as pd
     from datetime import date
 
+    def k(scope: str, name: str) -> str:
+        return f"{scope}__{name}"
+
     from src import (
         backtester,
         dataops,
@@ -48,16 +51,22 @@ def main():
     cycle_tab, backtest_tab = st.tabs(["Weekly Cycle", "Backtest"])
 
     with cycle_tab:
-        as_of = st.date_input("As-of date", value=date.today())
+        as_of = st.date_input("As-of date", value=date.today(), key=k("global", "asof"))
 
-        universe_mode = st.selectbox("Universe Mode", ["auto", "manual"], index=0)
+        universe_mode = st.selectbox(
+            "Universe Mode", ["auto", "manual"], index=0, key=k("weekly", "mode")
+        )
         manual_universe = None
         if universe_mode == "manual":
-            manual_universe = st.selectbox("Universe", universe_choices, index=0)
+            manual_universe = st.selectbox(
+                "Universe", universe_choices, index=0, key=k("weekly", "universe")
+            )
 
-        apply_filters = st.checkbox("Apply liquidity/price filters", value=True)
+        apply_filters = st.checkbox(
+            "Apply liquidity/price filters", value=True, key=k("weekly", "apply_filters")
+        )
 
-        if st.button("Refresh universe lists now"):
+        if st.button("Refresh universe lists now", key=k("global", "refresh_universes")):
             results = universe_registry.refresh_all(force=True)
             st.success("Universe registry refresh complete.")
             st.json(results)
@@ -93,7 +102,7 @@ def main():
             "and review the resulting portfolio snapshot."
         )
 
-        if st.button("Run Weekly Cycle"):
+        if st.button("Run Weekly Cycle", key=k("weekly", "run_btn")):
             try:
                 selection_cfg = spec_data.get("universe_selection", {})
                 decision_info = None
@@ -209,16 +218,83 @@ def main():
 
     with backtest_tab:
         st.subheader("Walk-Forward Backtest")
-        universe_name = st.selectbox("Universe", universe_choices, index=0)
-        years = st.slider("Price history (years)", 1, 10, 5)
-        lookback_days = st.slider("Lookback window (days)", 60, 504, 252, step=21)
-        target_vol = st.number_input("Volatility target (annualised)", min_value=0.0, max_value=1.0, value=0.15, step=0.01)
-        beta_limit = st.number_input("Beta limit vs SPY", min_value=0.0, max_value=3.0, value=1.2, step=0.1)
-        drawdown_limit = st.number_input("Drawdown throttle", min_value=0.0, max_value=0.9, value=0.20, step=0.05)
-        base_bps = st.number_input("Base transaction cost (bps)", min_value=0.0, max_value=50.0, value=5.0, step=0.5)
+        bt_mode = st.selectbox(
+            "Backtest Universe Mode",
+            ["auto", "manual"],
+            index=0,
+            key=k("bt", "mode"),
+        )
+        bt_universe = None
+        if bt_mode == "manual":
+            bt_universe = st.selectbox(
+                "Backtest Universe",
+                universe_choices,
+                index=0,
+                key=k("bt", "universe"),
+            )
 
-        if st.button("Run Backtest"):
+        years = st.slider("History (years)", 3, 10, 5, key=k("bt", "years"))
+        lookback_days = st.slider(
+            "Lookback window (days)", 60, 504, 252, step=21, key=k("bt", "lookback")
+        )
+        target_vol = st.number_input(
+            "Volatility target (annualised)",
+            min_value=0.0,
+            max_value=1.0,
+            value=0.15,
+            step=0.01,
+            key=k("bt", "target_vol"),
+        )
+        beta_limit = st.number_input(
+            "Beta limit vs SPY",
+            min_value=0.0,
+            max_value=3.0,
+            value=1.2,
+            step=0.1,
+            key=k("bt", "beta_limit"),
+        )
+        drawdown_limit = st.number_input(
+            "Drawdown throttle",
+            min_value=0.0,
+            max_value=0.9,
+            value=0.20,
+            step=0.05,
+            key=k("bt", "drawdown"),
+        )
+        base_bps = st.number_input(
+            "Base transaction cost (bps)",
+            min_value=0.0,
+            max_value=50.0,
+            value=5.0,
+            step=0.5,
+            key=k("bt", "base_bps"),
+        )
+        use_costs = st.checkbox(
+            "Include transaction costs", True, key=k("bt", "tc")
+        )
+        use_vol = st.checkbox(
+            "Target volatility (10% ann.)", True, key=k("bt", "vol")
+        )
+
+        if st.button("Run Walk-Forward Backtest", key=k("bt", "run_btn")):
             try:
+                selection_cfg = spec_data.get("universe_selection", {})
+                if bt_mode == "auto":
+                    candidates = selection_cfg.get("candidates") or spec_data.get("universe", {}).get("modes", [])
+                    if not candidates:
+                        candidates = universe_choices
+                    constraints = selection_cfg.get("constraints", {}) or {}
+                    decision_info = universe_selector.choose_universe(
+                        list(candidates),
+                        constraints,
+                        universe_registry.load_universe,
+                        Path("metrics_history.json"),
+                        spec_data,
+                        date.today(),
+                    )
+                    universe_name = decision_info.get("winner") or candidates[0]
+                else:
+                    universe_name = bt_universe or universe_choices[0]
                 frame = universe_registry.load_universe(universe_name)
             except Exception as exc:
                 st.error(f"Failed to load universe constituents: {exc}")
@@ -249,10 +325,10 @@ def main():
                 spec_version=str(spec_data.get("version", "v0.5")),
                 rebalance_frequency="W-FRI",
                 lookback_days=int(lookback_days),
-                target_vol=float(target_vol) if target_vol else None,
+                target_vol=float(target_vol) if use_vol else None,
                 beta_limit=float(beta_limit) if beta_limit else None,
                 drawdown_limit=float(drawdown_limit) if drawdown_limit else None,
-                base_bps=float(base_bps),
+                base_bps=float(base_bps) if use_costs else 0.0,
                 benchmark="SPY",
             )
 
@@ -280,7 +356,12 @@ def main():
             st.dataframe(turnover_df.join(cost_df, how="outer").fillna(0.0))
 
             csv = result["net_returns"].to_csv().encode("utf-8")
-            st.download_button("Download net returns", csv, file_name="net_returns.csv")
+            st.download_button(
+                "Download net returns",
+                csv,
+                file_name="net_returns.csv",
+                key=k("bt", "download_net_returns"),
+            )
 
             if "log_path" in result:
                 st.caption(f"Result stored at {result['log_path']}")
