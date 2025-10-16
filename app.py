@@ -15,12 +15,29 @@ def main():
     from datetime import date
 
     # Local imports
-    from src import dataops, features, signals, portfolio, metrics, report, memory, universe
+    from src import (
+        dataops,
+        features,
+        signals,
+        portfolio,
+        metrics,
+        report,
+        memory,
+        universe,
+        universe_registry,
+    )
 
     st.title("LLM-Codex Quant (S&P 500) — Weekly")
 
     as_of = st.date_input("As-of date", value=date.today())
-    universe_mode = st.selectbox("Universe mode", ["SP500", "SP500_FULL", "R1000"], index=0)
+    universe_choices = ["SP500_MINI", "SP500_FULL", "R1000", "NASDAQ_100", "FTSE_350"]
+    default_index = universe_choices.index("SP500_FULL") if "SP500_FULL" in universe_choices else 0
+    universe_mode = st.selectbox("Universe", universe_choices, index=default_index)
+
+    if st.button("Refresh universe lists now"):
+        results = universe_registry.refresh_all(force=True)
+        st.success("Universe registry refresh complete.")
+        st.json(results)
 
     st.markdown(
         "This demo builds a simplified, AI-driven S&P 500 portfolio using "
@@ -31,7 +48,14 @@ def main():
     if st.button("Run Weekly Cycle"):
         try:
             # === 1. Universe ===
-            uni = universe.load_universe(universe_mode)
+            try:
+                uni = universe.load_universe(universe_mode)
+            except universe_registry.UniverseRegistryError as exc:
+                st.error(str(exc))
+                st.stop()
+            except Exception as exc:
+                st.error(f"Failed to load {universe_mode}: {exc}")
+                st.stop()
             symbols = [s for s in uni["symbol"].tolist() if isinstance(s, str)]
             if "SPY" not in symbols:
                 symbols.append("SPY")
