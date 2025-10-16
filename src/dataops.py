@@ -6,7 +6,7 @@ import pandas as pd
 import yfinance as yf
 
 from .config import CACHE_DIR
-from .utils import load_sp500_symbols
+from .universe import load_universe as _load_universe
 
 
 def fetch_prices(symbols, years=5, interval="1d") -> pd.DataFrame:
@@ -19,9 +19,8 @@ def fetch_prices(symbols, years=5, interval="1d") -> pd.DataFrame:
     df.columns = [c.replace(" ", "") for c in df.columns]
     return df
 
-
-def load_universe() -> pd.DataFrame:
-    return load_sp500_symbols()
+def load_universe(mode: str = "SP500") -> pd.DataFrame:
+    return _load_universe(mode)
 
 
 def cache_parquet(df: pd.DataFrame, name: str) -> str:

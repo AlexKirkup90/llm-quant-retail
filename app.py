@@ -1,4 +1,5 @@
 # app.py
+import json
 import sys
 from pathlib import Path
 
@@ -14,12 +15,12 @@ def main():
     from datetime import date
 
     # Local imports
-    from src import dataops, features, signals, portfolio, metrics, report, memory
-    from src.utils import load_sp500_symbols
+    from src import dataops, features, signals, portfolio, metrics, report, memory, universe
 
     st.title("LLM-Codex Quant (S&P 500) — Weekly")
 
     as_of = st.date_input("As-of date", value=date.today())
+    universe_mode = st.selectbox("Universe mode", ["SP500", "SP500_FULL", "R1000"], index=0)
 
     st.markdown(
         "This demo builds a simplified, AI-driven S&P 500 portfolio using "
@@ -30,15 +31,20 @@ def main():
     if st.button("Run Weekly Cycle"):
         try:
             # === 1. Universe ===
-            uni = load_sp500_symbols()
+            uni = universe.load_universe(universe_mode)
             symbols = [s for s in uni["symbol"].tolist() if isinstance(s, str)]
             if "SPY" not in symbols:
                 symbols.append("SPY")
+            max_symbols = 150
+            if len(symbols) > max_symbols:
+                st.info(f"Capping universe to first {max_symbols} symbols for runtime safety.")
+                symbols = symbols[:max_symbols]
             st.write(f"Universe size: {len(symbols)}")
 
             # === 2. Data ===
             try:
                 prices = dataops.fetch_prices(symbols, years=5)
+                dataops.cache_parquet(prices, f"prices_{universe_mode.lower()}")
             except Exception:
                 # fabricate dummy data if network or API fails
                 idx = pd.date_range(end=date.today(), periods=252 * 5, freq="B")
@@ -57,8 +63,8 @@ def main():
             except Exception:
                 # fallback: fabricate random standardized features
                 feats = pd.DataFrame(
-                    np.random.randn(len(prices), 6),
-                    index=prices.index,
+                    np.random.randn(len(prices.columns), 6),
+                    index=prices.columns,
                     columns=[
                         "mom_6m", "value_ey", "quality_roic",
                         "risk_beta", "eps_rev_3m", "news_sent",
@@ -79,14 +85,40 @@ def main():
             fwd_target.name = "fwd_5d"
 
             # === 5. Signals ===
+            feature_history = {}
+            hist_returns = fwd5.dropna(how="all")
+            history_dates = hist_returns.tail(signals.ROLLING_WEEKS).index
+            for ts in history_dates:
+                price_slice = prices.loc[:ts]
+                if price_slice.empty:
+                    continue
+                try:
+                    feature_snapshot = features.combine_features(price_slice)
+                    feature_history[ts] = feature_snapshot
+                except Exception:
+                    continue
+
             try:
-                w_ridge = signals.fit_ridge(feats, fwd_target)
+                rolling_returns = hist_returns.loc[history_dates]
+                w_ridge = signals.fit_rolling_ridge(rolling_returns, feature_history)
+                if w_ridge.empty:
+                    w_ridge = signals.fit_ridge(feats, fwd_target)
                 scores = signals.score_current(feats, w_ridge)
             except Exception:
                 # fallback: random scores
-                scores = pd.Series(np.random.randn(feats.shape[1]), index=feats.columns)
+                scores = pd.Series(np.random.randn(len(feats.index)), index=feats.index)
+
             st.subheader("Top candidates")
             st.dataframe(scores.head(20).to_frame())
+
+            weights_path = Path(signals.RUNS_DIR) / "feature_weights.json"
+            if weights_path.exists():
+                try:
+                    weights_json = json.loads(weights_path.read_text())
+                    st.subheader("Feature weights (smoothed)")
+                    st.dataframe(pd.Series(weights_json.get("weights", {}), name="weight"))
+                except Exception:
+                    st.warning("Unable to load feature weights cache.")
 
             # === 6. Portfolio ===
             returns_252 = prices.pct_change().iloc[-252:]
@@ -139,10 +171,6 @@ def main():
             bench = returns_252.get("SPY", pd.Series(0.0, index=returns_252.index))
             alpha = metrics.alpha_vs_bench(port_rets, bench) if not bench.empty else 0.0
 
-            memory.append_metrics(
-                {"as_of": str(as_of), "sortino": sor, "mdd": mdd, "alpha": alpha}
-            )
-
             st.subheader("Weekly metrics")
             st.write(
                 f"- Sortino: **{sor:.2f}**  \n"
@@ -164,15 +192,17 @@ def main():
                 file_name=out.split("/")[-1],
             )
             # === 9. Log Metrics for Evaluator ===
-            import json
-
+            val = metrics.val_metrics(port_rets, bench)
             metrics_record = {
-                "spec": "v0.2",
+                "spec": "v0.3",
                 "date": str(as_of),
                 "alpha": float(alpha),
                 "sortino": float(sor),
                 "max_drawdown": float(mdd),
-                "hit_rate": float((port_rets > bench).mean())
+                "hit_rate": float((port_rets > bench).mean()),
+                "val_sortino": float(val.get("val_sortino", float("nan"))),
+                "val_alpha": float(val.get("val_alpha", float("nan"))),
+                "universe": universe_mode,
             }
 
             metrics_file = Path("metrics_history.json")

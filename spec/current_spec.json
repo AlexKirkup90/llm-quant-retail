@@ -36,5 +36,34 @@
     "Add universe loader for SP500_FULL and R1000 with CSVs under data/reference/.",
     "Apply liquidity/price filters post-merge; warn on dropped tickers.",
     "Weights: base from rolling ridge; then apply regime scalers; then normalize."
-  ]
+  ],
+  "universe": {
+    "modes": ["SP500", "SP500_FULL", "R1000"],
+    "fallback": "SP500_MINI",
+    "filters": {
+      "price": 3.0,
+      "adv_usd": 5000000
+    }
+  },
+  "data": {
+    "price_years": 5,
+    "adv_source": "data/reference/ohlcv_latest.csv"
+  },
+  "weights": {
+    "method": "rolling_ridge",
+    "alpha": 10.0,
+    "ema_lambda": 0.9,
+    "output_file": "runs/feature_weights.json"
+  },
+  "risk": {
+    "regime_scalers": {
+      "vol_regime": "spec.regime_scalers.vol_regime",
+      "market_sentiment": "spec.regime_scalers.market_sentiment"
+    }
+  },
+  "evaluation": {
+    "validation_split": "rolling_80_20",
+    "metrics": ["sortino", "alpha", "val_sortino", "val_alpha"]
+  },
+  "change_proposal": "Implement universe loader, adaptive weights, validation logging per v0.3"
 }
