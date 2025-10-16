@@ -1,0 +1,205 @@
+{
+  "config": {
+    "base_bps": 5.0,
+    "benchmark": "SPY",
+    "beta_limit": 1.2,
+    "drawdown_limit": 0.1,
+    "lookback_days": 60,
+    "rebalance_frequency": "W-FRI",
+    "spec_version": "v0.5",
+    "target_vol": 0.2,
+    "universe": "TEST"
+  },
+  "overlays": {
+    "2023-01-06T00:00:00": {
+      "beta_scale": 1.0,
+      "drawdown_scale": 1.0,
+      "vol_scale": 3.0
+    },
+    "2023-01-13T00:00:00": {
+      "beta_scale": 1.0,
+      "drawdown_scale": 1.0,
+      "vol_scale": 3.0
+    },
+    "2023-01-20T00:00:00": {
+      "beta_scale": 1.0,
+      "drawdown_scale": 1.0,
+      "vol_scale": 3.0
+    },
+    "2023-01-27T00:00:00": {
+      "beta_scale": 1.0,
+      "drawdown_scale": 1.0,
+      "vol_scale": 3.0
+    },
+    "2023-02-03T00:00:00": {
+      "beta_scale": 1.0,
+      "drawdown_scale": 1.0,
+      "vol_scale": 3.0
+    },
+    "2023-02-10T00:00:00": {
+      "beta_scale": 1.0,
+      "drawdown_scale": 1.0,
+      "vol_scale": 3.0
+    },
+    "2023-02-17T00:00:00": {
+      "beta_scale": 1.0,
+      "drawdown_scale": 1.0,
+      "vol_scale": 3.0
+    },
+    "2023-02-24T00:00:00": {
+      "beta_scale": 1.0,
+      "drawdown_scale": 1.0,
+      "vol_scale": 3.0
+    },
+    "2023-03-03T00:00:00": {
+      "beta_scale": 1.0,
+      "drawdown_scale": 1.0,
+      "vol_scale": 3.0
+    },
+    "2023-03-10T00:00:00": {
+      "beta_scale": 1.0,
+      "drawdown_scale": 1.0,
+      "vol_scale": 3.0
+    },
+    "2023-03-17T00:00:00": {
+      "beta_scale": 1.0,
+      "drawdown_scale": 1.0,
+      "vol_scale": 3.0
+    },
+    "2023-03-24T00:00:00": {
+      "beta_scale": 1.0,
+      "drawdown_scale": 1.0,
+      "vol_scale": 3.0
+    },
+    "2023-03-31T00:00:00": {
+      "beta_scale": 0.21503333745744532,
+      "drawdown_scale": 1.0,
+      "vol_scale": 3.0
+    },
+    "2023-04-07T00:00:00": {
+      "beta_scale": 0.21560443879864005,
+      "drawdown_scale": 1.0,
+      "vol_scale": 3.0
+    },
+    "2023-04-14T00:00:00": {
+      "beta_scale": 0.21607863577124123,
+      "drawdown_scale": 1.0,
+      "vol_scale": 3.0
+    },
+    "2023-04-21T00:00:00": {
+      "beta_scale": 0.21647007265848545,
+      "drawdown_scale": 1.0,
+      "vol_scale": 3.0
+    },
+    "2023-04-28T00:00:00": {
+      "beta_scale": 1.0,
+      "drawdown_scale": 1.0,
+      "vol_scale": 3.0
+    },
+    "2023-05-05T00:00:00": {
+      "beta_scale": 1.0,
+      "drawdown_scale": 1.0,
+      "vol_scale": 3.0
+    },
+    "2023-05-12T00:00:00": {
+      "beta_scale": 1.0,
+      "drawdown_scale": 1.0,
+      "vol_scale": 3.0
+    },
+    "2023-05-19T00:00:00": {
+      "beta_scale": 1.0,
+      "drawdown_scale": 1.0,
+      "vol_scale": 3.0
+    },
+    "2023-05-26T00:00:00": {
+      "beta_scale": 1.0,
+      "drawdown_scale": 1.0,
+      "vol_scale": 3.0
+    },
+    "2023-06-02T00:00:00": {
+      "beta_scale": 1.0,
+      "drawdown_scale": 1.0,
+      "vol_scale": 3.0
+    },
+    "2023-06-09T00:00:00": {
+      "beta_scale": 1.0,
+      "drawdown_scale": 1.0,
+      "vol_scale": 3.0
+    },
+    "2023-06-16T00:00:00": {
+      "beta_scale": 1.0,
+      "drawdown_scale": 1.0,
+      "vol_scale": 3.0
+    },
+    "2023-06-23T00:00:00": {
+      "beta_scale": 1.0,
+      "drawdown_scale": 1.0,
+      "vol_scale": 3.0
+    },
+    "2023-06-30T00:00:00": {
+      "beta_scale": 1.0,
+      "drawdown_scale": 1.0,
+      "vol_scale": 3.0
+    },
+    "2023-07-07T00:00:00": {
+      "beta_scale": 1.0,
+      "drawdown_scale": 1.0,
+      "vol_scale": 3.0
+    },
+    "2023-07-14T00:00:00": {
+      "beta_scale": 1.0,
+      "drawdown_scale": 1.0,
+      "vol_scale": 3.0
+    },
+    "2023-07-21T00:00:00": {
+      "beta_scale": 1.0,
+      "drawdown_scale": 1.0,
+      "vol_scale": 3.0
+    },
+    "2023-07-28T00:00:00": {
+      "beta_scale": 0.2189664615474373,
+      "drawdown_scale": 1.0,
+      "vol_scale": 3.0
+    },
+    "2023-08-04T00:00:00": {
+      "beta_scale": 0.21938217539676746,
+      "drawdown_scale": 1.0,
+      "vol_scale": 3.0
+    }
+  },
+  "stats": {
+    "gross": {
+      "25%": -2.154699152956493e-05,
+      "50%": 0.00040941111834169597,
+      "75%": 0.0011287883709784063,
+      "count": 155.0,
+      "max": 0.001741375537259282,
+      "mean": 0.0005759055057367636,
+      "min": -0.0003069565086993853,
+      "std": 0.0006205627286331833
+    },
+    "net": {
+      "25%": -2.7453494554242542e-05,
+      "50%": 0.0003911844341912829,
+      "75%": 0.001111625566252994,
+      "count": 155.0,
+      "max": 0.0017329059103206035,
+      "mean": 0.0005434727546259511,
+      "min": -0.0014822519522388897,
+      "std": 0.0006550595779513542
+    }
+  },
+  "summary": {
+    "alpha": 0.000463573400086095,
+    "avg_turnover": 0.3243273461987422,
+    "gross_cagr": 0.15608380880538286,
+    "gross_vs_net_spread": 0.009411305308074436,
+    "last_equity": 1.0878272846611403,
+    "max_drawdown": 0.007429756628613116,
+    "net_cagr": 0.14667250349730843,
+    "sharpe": 13.21303954914462,
+    "sortino": 1.859621337691097,
+    "total_cost": 0.0050270764221759705,
+    "volatility": 0.010365149794363995
+  }
+}

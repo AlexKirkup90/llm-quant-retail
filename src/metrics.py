@@ -3,15 +3,18 @@ from typing import Dict, List, Tuple
 import numpy as np
 import pandas as pd
 
+
 def equity_curve(weights_hist: pd.DataFrame, returns: pd.DataFrame) -> pd.Series:
     aligned = weights_hist.shift(1).fillna(0)  # next-day open proxy
     port_ret = (aligned * returns).sum(axis=1)
     return (1 + port_ret).cumprod()
 
+
 def max_drawdown(curve: pd.Series) -> float:
     peak = curve.cummax()
     dd = (curve / peak - 1.0).min()
     return float(abs(dd))
+
 
 def sortino(returns: pd.Series, rf: float = 0.0) -> float:
     dr = returns - rf
@@ -21,9 +24,64 @@ def sortino(returns: pd.Series, rf: float = 0.0) -> float:
         return np.nan
     return dr.mean() / denom
 
+
+def sharpe(returns: pd.Series, rf: float = 0.0, periods_per_year: int = 252) -> float:
+    returns = pd.Series(returns).dropna()
+    if returns.empty:
+        return float("nan")
+    excess = returns - rf / periods_per_year
+    std = excess.std(ddof=0)
+    if std == 0 or np.isnan(std):
+        return float("nan")
+    return float(excess.mean() / std * np.sqrt(periods_per_year))
+
+
 def alpha_vs_bench(port_ret: pd.Series, bench_ret: pd.Series) -> float:
     diff = port_ret.align(bench_ret, join="inner", fill_value=0)
     return float(diff[0].sub(diff[1]).mean())
+
+
+def annual_return(returns: pd.Series, periods_per_year: int = 252) -> float:
+    returns = pd.Series(returns).dropna()
+    if returns.empty:
+        return float("nan")
+    total = (1 + returns).prod()
+    if total <= 0:
+        return float("nan")
+    years = len(returns) / periods_per_year if periods_per_year else 1.0
+    if years <= 0:
+        return float("nan")
+    return float(total ** (1 / years) - 1.0)
+
+
+def performance_summary(
+    net_returns: pd.Series,
+    bench_returns: pd.Series,
+    turnover: pd.Series,
+    costs: pd.Series,
+    *,
+    gross_returns: pd.Series | None = None,
+    periods_per_year: int = 252,
+) -> Dict[str, float]:
+    net = pd.Series(net_returns).dropna()
+    gross = pd.Series(gross_returns).dropna() if gross_returns is not None else net
+    bench = pd.Series(bench_returns).reindex(net.index).fillna(0.0)
+    curve = (1 + net).cumprod()
+
+    summary = {
+        "net_cagr": annual_return(net, periods_per_year=periods_per_year),
+        "gross_cagr": annual_return(gross, periods_per_year=periods_per_year),
+        "volatility": float(net.std(ddof=0) * np.sqrt(periods_per_year)) if not net.empty else float("nan"),
+        "sortino": sortino(net),
+        "sharpe": sharpe(net, periods_per_year=periods_per_year),
+        "max_drawdown": max_drawdown(curve) if not curve.empty else float("nan"),
+        "alpha": alpha_vs_bench(net, bench),
+        "avg_turnover": float(pd.Series(turnover).fillna(0.0).mean()),
+        "total_cost": float(pd.Series(costs).fillna(0.0).sum()),
+    }
+    summary["gross_vs_net_spread"] = summary["gross_cagr"] - summary["net_cagr"]
+    summary["last_equity"] = float(curve.iloc[-1]) if not curve.empty else 1.0
+    return summary
 
 
 def val_split_rolling_80_20(indexed: pd.Series | pd.DataFrame, window: int = 60) -> List[Tuple[pd.Index, pd.Index]]:

@@ -1,6 +1,20 @@
 {
-  "version": "0.4",
+  "version": "v0.5",
   "as_of": "2025-10-16",
+  "features": [
+    "live_ohlcv",
+    "backtesting",
+    "transaction_costs",
+    "risk_controls",
+    "bandit_universe_selection"
+  ],
+  "dependencies": [
+    "pandas",
+    "yfinance",
+    "numpy",
+    "matplotlib",
+    "streamlit"
+  ],
   "universe_modes": [
     "SP500_MINI",
     "SP500_FULL",
@@ -50,7 +64,7 @@
       "val_alpha"
     ]
   },
-  "features": [
+  "factor_features": [
     "mom_6m",
     "eps_rev_3m",
     "quality_roic",
@@ -64,7 +78,8 @@
     "Add universe loader for SP500_FULL and R1000 with CSVs under data/reference/.",
     "Apply liquidity/price filters post-merge; warn on dropped tickers.",
     "Weights: base from rolling ridge; then apply regime scalers; then normalize.",
-    "Introduce automated universe selection engine with telemetry constraints (v0.4)."
+    "Introduce automated universe selection engine with telemetry constraints (v0.4).",
+    "v0.5 introduces live OHLCV caching, walk-forward backtests, and risk overlays."
   ],
   "universe": {
     "modes": [
@@ -80,7 +95,8 @@
   },
   "data": {
     "price_years": 5,
-    "adv_source": "data/reference/ohlcv_latest.csv"
+    "adv_source": "data/reference/ohlcv_latest.csv",
+    "cache": "data/cache/prices"
   },
   "weights": {
     "method": "rolling_ridge",
@@ -92,7 +108,10 @@
     "regime_scalers": {
       "vol_regime": "spec.regime_scalers.vol_regime",
       "market_sentiment": "spec.regime_scalers.market_sentiment"
-    }
+    },
+    "target_vol": 0.15,
+    "beta_limit": 1.2,
+    "drawdown_limit": 0.2
   },
   "evaluation": {
     "validation_split": "rolling_80_20",
@@ -103,7 +122,7 @@
       "val_alpha"
     ]
   },
-  "change_proposal": "Add automated universe selection engine, telemetry logging, and v0.4 spec compliance.",
+  "change_proposal": "Add automated universe selection engine, telemetry logging, and v0.5 spec compliance.",
   "universe_selection": {
     "lookback_weeks": 8,
     "min_weeks": 4,
