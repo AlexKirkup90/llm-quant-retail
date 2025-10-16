@@ -6,3 +6,6 @@ scikit-learn
 cvxpy
 matplotlib
 pytest
+requests
+lxml
+beautifulsoup4

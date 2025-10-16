@@ -2,22 +2,15 @@ from __future__ import annotations
 
 import json
 import logging
-from pathlib import Path
-from typing import Dict, Iterable
+from typing import Iterable
 
 import pandas as pd
 
+from . import universe_registry
 from .config import REF_DIR, RUNS_DIR
 from .utils import load_sp500_symbols
 
 LOGGER = logging.getLogger(__name__)
-
-UNIVERSE_FILES: Dict[str, Path] = {
-    "SP500": REF_DIR / "sp500.csv",
-    "SP500_FULL": REF_DIR / "sp500_full.csv",
-    "R1000": REF_DIR / "r1000.csv",
-    "SP500_MINI": REF_DIR / "sp500_mini.csv",
-}
 
 OHLCV_FILE = REF_DIR / "ohlcv_latest.csv"
 
@@ -28,31 +21,28 @@ MIN_ADV = 5_000_000
 def _load_base(mode: str) -> pd.DataFrame:
     mode = mode.upper()
     if mode == "SP500":
-        return load_sp500_symbols()
-    path = UNIVERSE_FILES.get(mode)
-    if path and path.exists():
-        try:
-            df = pd.read_csv(path)
-            df["symbol"] = df["symbol"].str.upper().str.strip()
-            return df
-        except Exception as exc:
-            LOGGER.warning("Failed to read %s: %s", path, exc)
-    if mode != "SP500_MINI":
-        LOGGER.warning("Falling back to SP500_MINI for mode=%s", mode)
-    mini_path = UNIVERSE_FILES.get("SP500_MINI")
-    if mini_path and mini_path.exists():
-        df = pd.read_csv(mini_path)
+        df = load_sp500_symbols()
         df["symbol"] = df["symbol"].str.upper().str.strip()
         return df
-    df = load_sp500_symbols()
-    df["symbol"] = df["symbol"].str.upper().str.strip()
-    return df
+    if mode in universe_registry.registry_list():
+        try:
+            df = universe_registry.load_universe(mode)
+        except universe_registry.UniverseRegistryError:
+            if mode == "SP500_MINI":
+                df = load_sp500_symbols().head(5).copy()
+                df["symbol"] = df["symbol"].str.upper().str.strip()
+                mini_path = REF_DIR / "sp500_mini.csv"
+                mini_path.parent.mkdir(parents=True, exist_ok=True)
+                df.to_csv(mini_path, index=False)
+                return df
+            raise
+        df["symbol"] = df["symbol"].str.upper().str.strip()
+        return df
+    raise ValueError(f"Unknown universe mode: {mode}")
 
 
 def _ensure_mini_cache(df: pd.DataFrame) -> None:
-    mini_path = UNIVERSE_FILES.get("SP500_MINI")
-    if mini_path is None:
-        return
+    mini_path = REF_DIR / "sp500_mini.csv"
     try:
         mini_path.parent.mkdir(parents=True, exist_ok=True)
         if not mini_path.exists():
@@ -112,23 +102,32 @@ def _log_universe(mode: str, symbols: Iterable[str]) -> None:
 def load_universe(mode: str = "SP500") -> pd.DataFrame:
     """Load the desired universe and apply liquidity/price filters.
 
-    Falls back to a minimal S&P 500 subset when reference files are missing.
-    Never raises: returns at least a non-empty frame of tickers.
+    The registry-backed universes may raise
+    :class:`src.universe_registry.UniverseRegistryError` when both live and
+    cached data are unavailable. When liquidity filters remove every symbol we
+    return the unfiltered base universe (or the cached ``SP500_MINI`` subset
+    when that mode is explicitly requested).
     """
 
     mode = (mode or "SP500").upper()
     base = _load_base(mode)
     if base.empty:
-        LOGGER.warning("Base universe empty for mode=%s; using SP500_MINI", mode)
-        base = _load_base("SP500_MINI")
+        if mode != "SP500_MINI":
+            raise universe_registry.UniverseRegistryError(
+                f"Universe {mode} is empty after loading"
+            )
+        base = base.head(5)
     _ensure_mini_cache(base)
     ohlcv = _load_ohlcv()
     filtered = _apply_filters(base, ohlcv)
     if filtered.empty:
-        LOGGER.warning("All symbols filtered out for mode=%s; reverting to mini universe", mode)
-        base = _load_base("SP500_MINI")
-        filtered = _apply_filters(base, ohlcv)
-        if filtered.empty:
+        if mode == "SP500_MINI":
+            filtered = base
+        else:
+            LOGGER.warning(
+                "All symbols filtered out for mode=%s; returning unfiltered base universe",
+                mode,
+            )
             filtered = base
     symbols = filtered.get("symbol", [])
     _log_universe(mode, symbols)
