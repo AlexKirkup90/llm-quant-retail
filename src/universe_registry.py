@@ -63,7 +63,14 @@ class UniverseDefinition:
 _COLUMN_NORMALISATION = {
     "symbol": ["symbol", "ticker", "code", "tickers", "epic", "tidm", "ric"],
     "name": ["security", "name", "company", "constituent", "issuer"],
-    "sector": ["gics sector", "sector", "industry", "icb sector", "icb industry", "gics sub-industry"],
+    "sector": [
+        "gics sector",
+        "sector",
+        "industry",
+        "icb sector",
+        "icb industry",
+        "gics sub-industry",
+    ],
 }
 
 _MIN_ROWS = {
@@ -189,34 +196,65 @@ def _flatten_columns(df: DataFrame) -> DataFrame:
     return df
 
 
+def _normalize_headers(df: DataFrame) -> DataFrame:
+    df = _flatten_columns(df)
+    df = df.copy()
+    df.columns = [str(col).strip().lower() for col in df.columns]
+    return df
+
+
+def _maybe_promote_first_row(df: DataFrame) -> DataFrame:
+    if df.empty:
+        return df
+    first_row = _to_str_series(df.iloc[0])
+    lowered_values = [value.lower() for value in first_row.tolist()]
+    candidate_values = {
+        value for values in _COLUMN_NORMALISATION.values() for value in values
+    }
+    if not any(value in candidate_values for value in lowered_values):
+        return df
+    df = df.iloc[1:].copy()
+    df.columns = [value or f"col_{idx}" for idx, value in enumerate(lowered_values)]
+    df.columns = [str(col).strip().lower() for col in df.columns]
+    return df
+
+
 def _find_column(df: DataFrame, candidates: List[str]) -> Optional[str]:
-    lowered = {col.strip().lower(): col for col in df.columns}
+    lowered = {str(col).strip().lower(): col for col in df.columns}
     for candidate in candidates:
         if candidate in lowered:
             return lowered[candidate]
     for col in df.columns:
-        col_norm = col.strip().lower()
+        col_norm = str(col).strip().lower()
         for candidate in candidates:
             if candidate in col_norm:
                 return col
     return None
 
 
-def _to_str_series(series: pd.Series) -> pd.Series:
-    return series.astype(str).fillna("").replace("nan", "").map(lambda x: x.strip())
+def _to_str_series(s: pd.Series) -> pd.Series:
+    if not isinstance(s, pd.Series):
+        s = pd.Series(s)
+    s = s.astype("string")
+    s = s.fillna("").str.replace(r"\s+", " ", regex=True).str.strip()
+    s = s.str.replace(r"\[\d+\]", "", regex=True).str.strip()
+    return s
 
 
-def _append_ftse_suffix(symbol: str) -> str:
-    symbol = symbol.strip().upper()
-    if not symbol:
-        return symbol
-    if symbol.endswith(".L"):
-        return symbol
-    return f"{symbol}.L"
+def _ensure_l_suffix(sym: str) -> str:
+    sym = sym or ""
+    if not sym:
+        return sym
+    if sym.endswith(".L"):
+        return sym
+    if sym.endswith("."):
+        return f"{sym[:-1]}.L"
+    return f"{sym}.L"
 
 
 def _normalize_universe_df(df: pd.DataFrame, universe: str) -> pd.DataFrame:
-    df = _flatten_columns(df)
+    df = _normalize_headers(df)
+    df = _maybe_promote_first_row(df)
     df = df.replace({pd.NA: "", None: ""})
 
     symbol_col = _find_column(df, _COLUMN_NORMALISATION["symbol"])
@@ -226,36 +264,61 @@ def _normalize_universe_df(df: pd.DataFrame, universe: str) -> pd.DataFrame:
     sector_col = _find_column(df, _COLUMN_NORMALISATION["sector"])
 
     symbol = _to_str_series(df[symbol_col]).str.upper()
-    name = _to_str_series(df[name_col]) if name_col else pd.Series("", index=df.index)
-    sector = _to_str_series(df[sector_col]) if sector_col else pd.Series("", index=df.index)
+    name = _to_str_series(df[name_col]) if name_col else pd.Series("", index=df.index, dtype="string")
+    sector = (
+        _to_str_series(df[sector_col])
+        if sector_col
+        else pd.Series("", index=df.index, dtype="string")
+    )
 
     out = pd.DataFrame({"symbol": symbol, "name": name, "sector": sector})
     out = out.loc[out["symbol"] != ""].copy()
 
     if universe.upper() == "FTSE_350":
-        out["symbol"] = out["symbol"].map(_append_ftse_suffix)
+        out["symbol"] = out["symbol"].map(_ensure_l_suffix)
 
     out = out.drop_duplicates(subset="symbol", keep="first")
 
     return out[["symbol", "name", "sector"]].reset_index(drop=True)
 
+
+def _score_table(df: DataFrame) -> Tuple[int, int]:
+    score = 0
+    if _find_column(df, _COLUMN_NORMALISATION["name"]):
+        score += 1
+    if _find_column(df, _COLUMN_NORMALISATION["sector"]):
+        score += 1
+    return score, len(df)
+
+def _prepare_candidate_table(table: DataFrame) -> DataFrame:
+    table = _normalize_headers(table)
+    table = _maybe_promote_first_row(table)
+    return table
+
+
 def _extract_symbol_tables(url: str, html_path: Optional[Path]) -> List[DataFrame]:
     tables = _read_html(url, html_path)
-    symbol_tables: List[DataFrame] = []
+    candidates: List[DataFrame] = []
     for table in tables:
-        table = _flatten_columns(table)
-        if _find_column(table, _COLUMN_NORMALISATION["symbol"]) is not None:
-            symbol_tables.append(table)
-    if not symbol_tables:
+        candidate = _prepare_candidate_table(table)
+        if _find_column(candidate, _COLUMN_NORMALISATION["symbol"]) is None:
+            continue
+        candidates.append(candidate)
+    if not candidates:
         raise ValueError(f"No table with symbol-like column found for {url}")
-    return symbol_tables
+    return candidates
+
+
+def _extract_symbol_table(url: str, html_path: Optional[Path]) -> DataFrame:
+    candidates = _extract_symbol_tables(url, html_path)
+    best = max(candidates, key=_score_table)
+    return best
 
 
 def fetch_sp500_full(html_path: Optional[Path] = None) -> DataFrame:
     url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
     try:
-        tables = _extract_symbol_tables(url, html_path)
-        table = max(tables, key=len)
+        table = _extract_symbol_table(url, html_path)
         return _normalize_universe_df(table, "SP500_FULL")
     except ValueError as exc:
         raise ValueError(f"SP500_FULL provider failed: {exc}") from exc
@@ -264,8 +327,7 @@ def fetch_sp500_full(html_path: Optional[Path] = None) -> DataFrame:
 def fetch_nasdaq_100(html_path: Optional[Path] = None) -> DataFrame:
     url = "https://en.wikipedia.org/wiki/NASDAQ-100"
     try:
-        tables = _extract_symbol_tables(url, html_path)
-        table = max(tables, key=len)
+        table = _extract_symbol_table(url, html_path)
         return _normalize_universe_df(table, "NASDAQ_100")
     except ValueError as exc:
         raise ValueError(f"NASDAQ_100 provider failed: {exc}") from exc
@@ -274,8 +336,7 @@ def fetch_nasdaq_100(html_path: Optional[Path] = None) -> DataFrame:
 def fetch_r1000(html_path: Optional[Path] = None) -> DataFrame:
     url = "https://en.wikipedia.org/wiki/Russell_1000_Index"
     try:
-        tables = _extract_symbol_tables(url, html_path)
-        table = max(tables, key=len)
+        table = _extract_symbol_table(url, html_path)
         return _normalize_universe_df(table, "R1000")
     except ValueError as exc:
         raise ValueError(f"R1000 provider failed: {exc}") from exc
@@ -285,12 +346,12 @@ def fetch_ftse_350(html_path: Optional[Path] = None) -> DataFrame:
     url = "https://en.wikipedia.org/wiki/FTSE_350_Index"
     try:
         tables = _extract_symbol_tables(url, html_path)
-        normalised = [_normalize_universe_df(table, "FTSE_350") for table in tables]
+        normalized = [_normalize_universe_df(table, "FTSE_350") for table in tables]
+        combined = pd.concat(normalized, ignore_index=True)
+        combined = combined.drop_duplicates(subset="symbol", keep="first")
+        return combined.reset_index(drop=True)
     except ValueError as exc:
         raise ValueError(f"FTSE_350 provider failed: {exc}") from exc
-    combined = pd.concat(normalised, ignore_index=True)
-    combined = combined.drop_duplicates(subset="symbol", keep="first")
-    return combined.reset_index(drop=True)
 
 
 _UNIVERSES: Dict[str, UniverseDefinition] = {
