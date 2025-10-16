@@ -39,6 +39,25 @@ def main():
         st.success("Universe registry refresh complete.")
         st.json(results)
 
+        row_counts = {}
+        universes = getattr(universe_registry, "_UNIVERSES", {})
+        for name, status in results.items():
+            if isinstance(status, str) and status.lower().startswith("error:"):
+                st.error(f"{name}: {status}")
+                continue
+            definition = universes.get(name)
+            if not definition:
+                continue
+            try:
+                df = pd.read_csv(definition.csv_path)
+                row_counts[name] = len(df)
+            except Exception as exc:
+                st.warning(f"Unable to read cached CSV for {name}: {exc}")
+
+        if row_counts:
+            st.write("Latest universe row counts:")
+            st.json(row_counts)
+
     st.markdown(
         "This demo builds a simplified, AI-driven S&P 500 portfolio using "
         "auto-generated features, fitted weights, and quick performance metrics. "

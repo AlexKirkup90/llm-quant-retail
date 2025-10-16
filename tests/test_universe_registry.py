@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pandas as pd
+from pandas.api import types as ptypes
 
 from src import universe_registry
 
@@ -13,17 +14,44 @@ def test_registry_known_universes():
 
 
 def test_parse_snapshots_offline():
-    sp500 = universe_registry.fetch_sp500_full(SNAPSHOT_DIR / "sp500_wikipedia.html")
-    nasdaq = universe_registry.fetch_nasdaq_100(SNAPSHOT_DIR / "nasdaq100_wikipedia.html")
-    ftse = universe_registry.fetch_ftse_350(SNAPSHOT_DIR / "ftse350_wikipedia.html")
-    r1000 = universe_registry.fetch_r1000(SNAPSHOT_DIR / "r1000_wikipedia.html")
+    snapshots = {
+        "SP500_FULL": universe_registry.fetch_sp500_full(
+            SNAPSHOT_DIR / "sp500_wikipedia.html"
+        ),
+        "NASDAQ_100": universe_registry.fetch_nasdaq_100(
+            SNAPSHOT_DIR / "nasdaq100_wikipedia.html"
+        ),
+        "FTSE_350": universe_registry.fetch_ftse_350(
+            SNAPSHOT_DIR / "ftse350_wikipedia.html"
+        ),
+        "R1000": universe_registry.fetch_r1000(
+            SNAPSHOT_DIR / "r1000_wikipedia.html"
+        ),
+    }
 
-    for frame in [sp500, nasdaq, ftse, r1000]:
+    for name, frame in snapshots.items():
         assert isinstance(frame, pd.DataFrame)
-        assert set(frame.columns) == {"symbol", "name", "sector"}
+        assert list(frame.columns) == ["symbol", "name", "sector"]
         assert not frame.empty
+        assert len(frame) >= universe_registry._MIN_ROWS[name] * 0.5
 
-    assert ftse["symbol"].str.endswith(".L").all()
+    assert snapshots["FTSE_350"]["symbol"].str.endswith(".L").all()
+
+
+def test_normalize_handles_integer_columns():
+    raw = pd.DataFrame(
+        {
+            "Ticker": [101, 202, 303, None],
+            "Security": ["Alpha", " beta", None, ""],
+            "Sector": [1, 2, None, 3],
+        }
+    )
+
+    normalized = universe_registry._normalize_universe_df(raw, "SP500_FULL")
+
+    assert len(normalized) == 3  # row with missing ticker dropped
+    assert ptypes.is_string_dtype(normalized["symbol"])
+    assert normalized["symbol"].equals(normalized["symbol"].str.upper())
 
 
 def test_refresh_writes_csvs(tmp_path, monkeypatch):
