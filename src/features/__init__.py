@@ -5,7 +5,7 @@ from typing import Optional, Sequence
 import numpy as np
 import pandas as pd
 
-from . import fundamentals_stub, sentiment_stub
+from .. import fundamentals_stub, sentiment_stub
 
 
 def pct_change_n(prices: pd.DataFrame, n: int) -> pd.DataFrame:

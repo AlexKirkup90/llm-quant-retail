@@ -94,3 +94,53 @@ def enforce_turnover(prev_w: pd.Series, cand_w: pd.Series, t_cap: float = 0.30) 
     lam = t_cap / t
     blended = lam * cand_w + (1 - lam) * prev_w.reindex(cand_w.index, fill_value=0)
     return (blended / blended.sum()).clip(lower=0)
+
+
+def apply_turnover_controls(
+    prev_w: pd.Series | None,
+    target_w: pd.Series,
+    *,
+    turnover_cap: float = 0.40,
+    rebalance_band: float = 0.25,
+) -> pd.Series:
+    """Apply rebalance banding and turnover cap controls."""
+
+    target = pd.Series(target_w).astype(float).clip(lower=0.0)
+    if target.empty:
+        return target
+    target_sum = target.sum()
+    if target_sum <= 0:
+        return target
+    target = target / target_sum
+
+    if prev_w is None or len(prev_w) == 0:
+        return target.sort_values(ascending=False)
+
+    prev = pd.Series(prev_w).astype(float)
+    union_index = prev.index.union(target.index)
+    prev = prev.reindex(union_index, fill_value=0.0)
+    working = target.reindex(union_index, fill_value=0.0)
+
+    band = max(0.0, float(rebalance_band))
+    if band > 0:
+        thresholds = band * working.abs()
+        diff = (working - prev).abs()
+        keep_mask = diff <= thresholds
+        working = working.where(~keep_mask, prev)
+
+    working = working.clip(lower=0.0)
+    if working.sum() > 0:
+        working = working / working.sum()
+
+    cap = max(0.0, float(turnover_cap))
+    current_turnover = turnover(prev, working)
+    if cap > 0 and current_turnover > cap:
+        lam = cap / current_turnover
+        blended = prev + lam * (working - prev)
+        blended = blended.clip(lower=0.0)
+        if blended.sum() > 0:
+            working = blended / blended.sum()
+        else:
+            working = blended
+
+    return working.sort_values(ascending=False)

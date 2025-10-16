@@ -1,5 +1,5 @@
 {
-  "version": "0.6",
+  "version": "0.7",
   "as_of": "2025-10-16",
   "features": [
     "live_ohlcv",
@@ -126,6 +126,12 @@
     "beta_limit": 1.2,
     "drawdown_limit": 0.2
   },
+  "signals": {
+    "velocity": { "enable": true, "windows": { "mom_accel": 6, "vol_window": 20, "delta_z": 8 } },
+    "residual_alpha": { "enable": true },
+    "adaptive_ic": { "enable": true, "alpha_ic": 0.2, "ema_lambda": 0.9, "clip": 0.5 },
+    "regime_blend": { "enable": true, "lookback_weeks": 8 }
+  },
   "evaluation": {
     "validation_split": "rolling_80_20",
     "metrics": [
@@ -133,7 +139,9 @@
       "alpha",
       "val_sortino",
       "val_alpha"
-    ]
+    ],
+    "track_ic": true,
+    "track_hit_rate": true
   },
   "change_proposal": "Add automated universe selection engine, telemetry logging, and v0.5 spec compliance.",
   "universe_selection": {
