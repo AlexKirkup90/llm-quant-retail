@@ -128,6 +128,15 @@ def compute_universe_metrics(
     return metrics_df
 
 
+def adaptive_top_k(universe_size: int) -> int:
+    """Return the adaptive Top-K cut-off for candidate universes."""
+
+    if universe_size <= 0:
+        return 0
+    base = max(25, min(60, int(0.10 * universe_size)))
+    return max(1, min(universe_size, base))
+
+
 def score_universes(
     metrics_df: pd.DataFrame, weights: Mapping[str, float], temperature: float
 ) -> Tuple[pd.Series, pd.Series]:
@@ -153,10 +162,19 @@ def score_universes(
     if temp <= 0:
         temp = 1.0
 
-    values = scores.to_numpy(dtype=float)
+    # Adaptive Top-K filtering: concentrate mass on the most attractive universes
+    k = adaptive_top_k(len(scores))
+    if 0 < k < len(scores):
+        top_idx = scores.nlargest(k).index
+        filtered_scores = scores.loc[top_idx]
+    else:
+        filtered_scores = scores
+
+    values = filtered_scores.to_numpy(dtype=float)
     values = np.where(np.isfinite(values), values, 0.0)
     if values.size == 0:
         probabilities = np.array([], dtype=float)
+        filtered_index = filtered_scores.index
     else:
         shifted = values / temp
         shifted -= np.max(shifted) if shifted.size else 0.0
@@ -166,8 +184,12 @@ def score_universes(
             probabilities = np.full_like(exps, 1.0 / len(exps))
         else:
             probabilities = exps / total
+        filtered_index = filtered_scores.index
 
-    probs_series = pd.Series(probabilities, index=scores.index, dtype=float)
+    probs_series = pd.Series(0.0, index=scores.index, dtype=float)
+    if len(filtered_index) > 0:
+        probs_series.loc[filtered_index] = probabilities
+
     return scores.astype(float), probs_series
 
 
@@ -274,14 +296,51 @@ def choose_universe(
             metrics_df.at[name, "coverage"] = coverage_now.get(name, 0.0)
     metrics_df["turnover_cost"] = metrics_df["turnover_cost"].fillna(0.0)
 
-    scores, probabilities = score_universes(metrics_df, weights, temperature)
-    if scores.empty:
-        scores = pd.Series(0.0, index=pd.Index(candidates, name="universe"))
-        probabilities = pd.Series(
-            [1.0 / len(candidates)] * len(candidates),
-            index=pd.Index(candidates, name="universe"),
-        )
+    base_scores, _ = score_universes(metrics_df, weights, temperature)
+    if base_scores.empty:
+        base_scores = pd.Series(0.0, index=pd.Index(candidates, name="universe"))
 
+    stability = (1.0 - metrics_df["mdd"].fillna(0.0)).clip(lower=0.0)
+    coverage_series = metrics_df["coverage"].fillna(0.0)
+    turnover_penalty = metrics_df["turnover_cost"].fillna(0.0)
+    weeks = metrics_df["n_weeks"].fillna(0.0).clip(lower=1.0)
+    total_weeks = float(max(weeks.max(), 1.0))
+    exploration = np.sqrt(np.log(total_weeks + 1.0) / weeks)
+    bandit_bonus = 0.1 * stability + 0.05 * coverage_series - 0.05 * turnover_penalty + 0.05 * exploration
+
+    combined_scores = base_scores.add(bandit_bonus, fill_value=0.0)
+
+    temp = float(temperature or 1.0)
+    if temp <= 0:
+        temp = 1.0
+
+    k = adaptive_top_k(len(combined_scores))
+    if 0 < k < len(combined_scores):
+        top_idx = combined_scores.nlargest(k).index
+    else:
+        top_idx = combined_scores.index
+
+    values = combined_scores.loc[top_idx].to_numpy(dtype=float)
+    values = np.where(np.isfinite(values), values, 0.0)
+    if values.size:
+        values = values / temp
+        values -= np.max(values)
+        exps = np.exp(values)
+        total = float(exps.sum())
+        if total <= 0:
+            probs = np.full_like(exps, 1.0 / len(exps))
+        else:
+            probs = exps / total
+    else:
+        probs = np.array([], dtype=float)
+
+    probabilities = pd.Series(0.0, index=combined_scores.index, dtype=float)
+    if len(top_idx) > 0 and probs.size:
+        probabilities.loc[top_idx] = probs
+    elif len(probabilities) > 0:
+        probabilities[:] = 1.0 / len(probabilities)
+
+    scores = combined_scores
     winner = str(probabilities.idxmax()) if not probabilities.empty else candidates[0]
 
     row = metrics_df.loc[winner]
@@ -326,6 +385,8 @@ def choose_universe(
         rationale=rationale,
         parameters={
             "temperature": temperature,
+            "bandit_bonus_mean": float(bandit_bonus.mean()) if len(bandit_bonus) else 0.0,
+            "bandit_bonus_max": float(bandit_bonus.max()) if len(bandit_bonus) else 0.0,
             **{f"w_{k}": float(v) for k, v in weights.items()},
         },
         metrics=metrics_df,

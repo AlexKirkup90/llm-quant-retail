@@ -7,7 +7,7 @@ from datetime import datetime, timezone, timedelta
 from html.parser import HTMLParser
 from io import StringIO
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import pandas as pd
 import requests
@@ -18,6 +18,7 @@ from urllib3.exceptions import InsecureRequestWarning
 from urllib3.util.retry import Retry
 
 from .config import REF_DIR
+from . import dataops
 
 LOGGER = logging.getLogger(__name__)
 
@@ -136,6 +137,26 @@ class UniverseRegistryError(RuntimeError):
 
 def registry_list() -> List[str]:
     return list(_UNIVERSES.keys())
+
+
+def load_universe_prices(
+    name: str,
+    symbols: Sequence[str],
+    *,
+    force_refresh: bool = False,
+    years: int = 5,
+) -> pd.DataFrame:
+    """Convenience wrapper around cached OHLCV loading for a universe."""
+
+    try:
+        return dataops.fetch_prices(
+            list(symbols),
+            years=years,
+            universe=name,
+            force_refresh=force_refresh,
+        )
+    except Exception as exc:  # pragma: no cover - network/cache issues handled by caller
+        raise UniverseRegistryError(str(exc)) from exc
 
 
 def _read_html(url: str, html_path: Optional[Path]) -> List[DataFrame]:

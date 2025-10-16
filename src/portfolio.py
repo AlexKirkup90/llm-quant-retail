@@ -1,14 +1,72 @@
-import pandas as pd
 import numpy as np
+import pandas as pd
 
-def inverse_vol_weights(returns_252: pd.DataFrame, tickers: list, cap_single: float = 0.10, k: int = 15) -> pd.Series:
+
+def apply_single_name_cap(weights: pd.Series, cap: float = 0.10) -> pd.Series:
+    """Apply a deterministic post-optimisation 10% single name cap.
+
+    The optimiser may occasionally allocate more than the configured cap to a
+    single security (e.g. due to turnover blending or infeasible solutions). We
+    therefore re-project the weights onto the capped simplex following the
+    procedure described in the stabilisation brief for v0.4.9.
+
+    Parameters
+    ----------
+    weights:
+        Candidate portfolio weights indexed by ticker.
+    cap:
+        Maximum allocation per security (default 10%).
+
+    Returns
+    -------
+    pandas.Series
+        Rebalanced weights respecting the cap, non-negative and ordered from
+        highest to lowest allocation.
+    """
+
+    if weights is None:
+        return pd.Series(dtype="float64")
+
+    w = pd.Series(weights, dtype="float64").clip(lower=0.0)
+    total = w.sum()
+    if not np.isfinite(total) or total <= 0:
+        return w.sort_values(ascending=False)
+
+    w = w / total
+    cap = float(max(0.0, cap))
+    if cap == 0:
+        return pd.Series(0.0, index=w.index)
+
+    excess = (w - cap).clip(lower=0.0).sum()
+    w = w.clip(upper=cap)
+
+    if w.sum() < 1.0 and excess > 0:
+        room = (cap - w).clip(lower=0.0)
+        room_total = room.sum()
+        if room_total > 0:
+            allocatable = min(excess, room_total)
+            if allocatable > 0:
+                w += room * (allocatable / room_total)
+
+    final_total = w.sum()
+    if final_total <= 0:
+        return pd.Series(0.0, index=w.index)
+
+    return (w / final_total).sort_values(ascending=False)
+
+
+def inverse_vol_weights(
+    returns_252: pd.DataFrame,
+    tickers: list,
+    cap_single: float = 0.10,
+    k: int = 15,
+) -> pd.Series:
     vol = returns_252.std().replace(0, np.nan).dropna()
     vol = vol.loc[vol.index.intersection(tickers)]
     top = vol.nsmallest(k).index
     inv = 1.0 / vol.loc[top]
     w = inv / inv.sum()
-    w = w.clip(upper=cap_single)
-    w = w / w.sum()
+    w = apply_single_name_cap(w, cap_single)
     return w
 
 def apply_sector_caps(weights: pd.Series, sector_map: pd.Series, cap: float = 0.35) -> pd.Series:
