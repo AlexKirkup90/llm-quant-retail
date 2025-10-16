@@ -1,3 +1,4 @@
+# Ensures 'src' is importable when running pytest from repo root or CI
 import sys
 from pathlib import Path
 
