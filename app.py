@@ -41,6 +41,8 @@ def main():
     if universe_mode == "manual":
         manual_universe = st.selectbox("Universe", universe_choices, index=default_index)
 
+    apply_filters = st.checkbox("Apply liquidity/price filters", value=True)
+
     if st.button("Refresh universe lists now"):
         results = universe_registry.refresh_all(force=True)
         st.success("Universe registry refresh complete.")
@@ -106,13 +108,26 @@ def main():
 
             # === 1. Universe ===
             try:
-                uni = universe.load_universe(selected_universe_name)
+                uni = universe.load_universe(
+                    selected_universe_name, apply_filters=apply_filters
+                )
             except universe_registry.UniverseRegistryError as exc:
                 st.error(str(exc))
                 st.stop()
             except Exception as exc:
                 st.error(f"Failed to load {selected_universe_name}: {exc}")
                 st.stop()
+
+            filter_meta = uni.attrs.get("universe_filter_meta", {})
+            raw_count = int(filter_meta.get("raw_count", len(uni)))
+            filtered_count = int(filter_meta.get("filtered_count", len(uni)))
+            filters_applied = bool(filter_meta.get("filters_applied", False))
+            reason = str(filter_meta.get("reason", "")) if filter_meta else ""
+
+            st.write(f"Universe size (raw): {raw_count}")
+            st.write("Universe size (post-filter): {}".format(filtered_count))
+            if not filters_applied and reason:
+                st.info(reason)
 
             if decision_info:
                 metrics_table = decision_info["metrics"].copy()

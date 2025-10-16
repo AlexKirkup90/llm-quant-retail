@@ -81,34 +81,36 @@ _MIN_ROWS = {
     "FTSE_350": 8,
 }
 
-_SPEC_MIN_CONSTRAINTS: Optional[Dict[str, int]] = None
+_SPEC_MIN_CACHE: Dict[Path, Dict[str, int]] = {}
 
 
-def _load_spec_min_constraints() -> Dict[str, int]:
-    global _SPEC_MIN_CONSTRAINTS
-    if _SPEC_MIN_CONSTRAINTS is not None:
-        return _SPEC_MIN_CONSTRAINTS
+def _load_spec_min_constraints(spec_path: Path) -> Dict[str, int]:
+    if spec_path in _SPEC_MIN_CACHE:
+        return _SPEC_MIN_CACHE[spec_path]
 
-    spec_path = Path(__file__).resolve().parent.parent / "spec" / "current_spec.json"
     try:
         data = json.loads(spec_path.read_text())
         selection = data.get("universe_selection", {})
         constraints = selection.get("constraints", {})
         min_map = constraints.get("min_constituents", {})
         if isinstance(min_map, dict):
-            _SPEC_MIN_CONSTRAINTS = {
+            result = {
                 key: int(value)
                 for key, value in min_map.items()
                 if value is not None
             }
         else:
-            _SPEC_MIN_CONSTRAINTS = {}
+            result = {}
     except (FileNotFoundError, json.JSONDecodeError, TypeError, ValueError):
-        _SPEC_MIN_CONSTRAINTS = {}
-    return _SPEC_MIN_CONSTRAINTS
+        result = {}
+
+    _SPEC_MIN_CACHE[spec_path] = result
+    return result
 
 
-def expected_min_constituents(name: str) -> int:
+def expected_min_constituents(
+    name: str, spec_path: Path = Path("spec/current_spec.json")
+) -> int:
     """Return expected minimum count for a universe.
 
     Preference order:
@@ -117,7 +119,7 @@ def expected_min_constituents(name: str) -> int:
         3. Default of 1 to avoid division by zero.
     """
 
-    min_constraints = _load_spec_min_constraints()
+    min_constraints = _load_spec_min_constraints(spec_path)
     if name in min_constraints:
         return max(1, int(min_constraints[name]))
     if "default" in min_constraints:

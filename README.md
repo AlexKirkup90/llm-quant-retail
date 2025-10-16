@@ -15,6 +15,11 @@ Universe constituents are sourced from Wikipedia and cached under
 older than 90 days (configurable per universe). FTSE tickers are persisted with
 an ``.L`` suffix to match LSE identifiers.
 
+Liquidity and price filters are only applied when a recent OHLCV snapshot is
+available under `data/reference/ohlcv_latest.csv`. When the snapshot is missing
+or stale the app falls back to the raw constituent lists and surfaces an
+informational warning.
+
 To force-refresh everything locally run:
 
 ```bash
