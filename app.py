@@ -18,10 +18,13 @@ def main():
     as_of = st.date_input("As-of date", value=date.today())
 
     if st.button("Run Weekly Cycle"):
-        # Universe
-        uni = load_sp500_symbols()
-        symbols = uni["symbol"].tolist()
-        st.write(f"Universe size: {len(symbols)}")
+            # Universe
+    uni = load_sp500_symbols()
+    symbols = uni["symbol"].tolist()
+    # Ensure SPY is present for benchmarking/returns
+    if "SPY" not in symbols:
+        symbols.append("SPY")
+    st.write(f"Universe size: {len(symbols)}")
 
         # Prices
         prices = dataops.fetch_prices(symbols + ["SPY"], years=5)
