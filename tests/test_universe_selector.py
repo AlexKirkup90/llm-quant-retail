@@ -1,6 +1,7 @@
 import json
-from datetime import date, timedelta
+
 import pandas as pd
+import pytest
 
 from src.universe_selector import (
     choose_universe,
@@ -9,136 +10,150 @@ from src.universe_selector import (
 )
 
 
-def _make_history(universes, weeks):
-    rows = []
-    start = date(2024, 1, 1)
-    for uni in universes:
-        for idx in range(weeks):
-            rows.append(
-                {
-                    "date": (start + timedelta(weeks=idx)).isoformat(),
-                    "universe": uni,
-                    "alpha": 0.01 * (idx + 1),
-                    "sortino": 1.0 + 0.1 * idx,
-                    "mdd": 0.05 + 0.01 * idx,
-                    "hit_rate": 0.5 + 0.02 * idx,
-                    "val_alpha": 0.005 * (idx + 1),
-                    "val_sortino": 0.8 + 0.05 * idx,
-                    "coverage": 0.7,
-                    "turnover_cost": 0.001 * idx,
-                }
-            )
-    return pd.DataFrame(rows)
+def _build_history() -> pd.DataFrame:
+    dates = pd.date_range("2024-01-05", periods=6, freq="W-FRI")
+    records = []
+    for idx, dt in enumerate(dates):
+        records.append(
+            {
+                "date": dt,
+                "universe": "U1",
+                "alpha": 0.10 + idx * 0.01,
+                "sortino": 1.5 + 0.1 * idx,
+                "mdd": 0.15 + 0.01 * idx,
+                "hit_rate": 0.55,
+                "val_alpha": 0.08,
+                "val_sortino": 1.1,
+                "coverage": 0.95,
+                "turnover_cost": 0.01,
+            }
+        )
+    for idx, dt in enumerate(dates[:2]):
+        records.append(
+            {
+                "date": dt,
+                "universe": "U2",
+                "alpha": 0.05 + idx * 0.02,
+                "sortino": 1.1 + 0.05 * idx,
+                "mdd": 0.10 + 0.02 * idx,
+                "hit_rate": 0.52,
+                "val_alpha": 0.04,
+                "val_sortino": 0.9,
+                "turnover_cost": 0.015,
+            }
+        )
+    for idx, dt in enumerate(dates[:4]):
+        records.append(
+            {
+                "date": dt,
+                "universe": "U3",
+                "alpha": 0.03 + idx * 0.015,
+                "sortino": 0.9 + 0.05 * idx,
+                "mdd": 0.18 + 0.015 * idx,
+                "hit_rate": 0.5,
+                "val_alpha": 0.02,
+                "val_sortino": 0.8,
+                "coverage": None,
+                "turnover_cost": 0.02,
+            }
+        )
+    return pd.DataFrame.from_records(records)
 
 
-def test_compute_universe_metrics_window():
-    history = _make_history(["U1", "U2", "U3"], 10)
-    metrics = compute_universe_metrics(history, lookback_weeks=4, min_weeks=6)
-    assert set(metrics.index) == {"U1", "U2", "U3"}
-    assert set(["alpha", "sortino", "mdd", "coverage", "turnover_cost", "n_weeks"]).issubset(
-        metrics.columns
+def test_compute_universe_metrics_respects_lookback():
+    history = _build_history()
+    metrics = compute_universe_metrics(history, lookback_weeks=4, min_weeks=3)
+
+    assert set(metrics.columns) == {
+        "alpha",
+        "sortino",
+        "mdd",
+        "hit_rate",
+        "val_alpha",
+        "val_sortino",
+        "coverage",
+        "turnover_cost",
+        "n_weeks",
+    }
+    assert metrics.loc["U1", "n_weeks"] == 4
+    # Last four alpha values for U1 start at 0.12
+    expected_alpha = (0.12 + 0.13 + 0.14 + 0.15) / 4
+    assert metrics.loc["U1", "alpha"] == pytest.approx(expected_alpha)
+    # Sparse universe still returns an entry
+    assert metrics.loc["U2", "n_weeks"] == 2
+
+
+def test_score_universes_softmax_and_ranking():
+    metrics_df = pd.DataFrame(
+        {
+            "alpha": [0.12, 0.05, 0.03],
+            "sortino": [1.4, 1.1, 0.9],
+            "mdd": [0.12, 0.08, 0.2],
+            "coverage": [0.9, 0.6, 0.3],
+            "turnover_cost": [0.01, 0.02, 0.03],
+        },
+        index=["U1", "U2", "U3"],
     )
-    assert metrics.loc["U1", "n_weeks"] == 4.0
+    weights = {"alpha": 0.4, "sortino": 0.25, "mdd": 0.2, "coverage": 0.1, "turnover": 0.05}
+
+    scores, probs = score_universes(metrics_df, weights, temperature=0.7)
+
+    assert pytest.approx(probs.sum(), rel=1e-6) == 1.0
+    ordered = scores.sort_values(ascending=False).index.tolist()
+    assert ordered[0] == "U1"
+    assert scores["U1"] > scores["U2"] > scores["U3"]
 
 
-def test_score_universes_softmax_sum_one():
-    metrics = pd.DataFrame(
-        {
-            "alpha": [0.02, 0.01],
-            "sortino": [1.5, 0.9],
-            "mdd": [0.1, 0.25],
-            "coverage": [0.9, 0.6],
-            "turnover_cost": [0.001, 0.002],
-        },
-        index=["U1", "U2"],
-    )
-    weights = {"alpha": 1.0, "sortino": 0.5, "mdd": 0.2, "coverage": 0.3, "turnover": 0.1}
-    scores, probs = score_universes(metrics, weights, temperature=0.7)
-    assert list(scores.index) == ["U1", "U2"]
-    assert abs(probs.sum() - 1.0) < 1e-8
-    assert (probs >= 0).all()
+def test_choose_universe_writes_log_and_returns_decision(tmp_path):
+    history = _build_history()
+    metrics_history_path = tmp_path / "metrics_history.json"
+    metrics_history_path.write_text(history.to_json(orient="records"))
 
-
-def test_choose_universe_logs_and_rationale(tmp_path):
-    metrics_path = tmp_path / "metrics_history.json"
-    history = [
-        {
-            "date": "2024-01-05",
-            "universe": "U1",
-            "alpha": 0.02,
-            "sortino": 1.2,
-            "mdd": 0.1,
-            "hit_rate": 0.55,
-            "val_alpha": 0.01,
-            "val_sortino": 0.9,
-            "turnover_cost": 0.001,
-        },
-        {
-            "date": "2024-01-12",
-            "universe": "U2",
-            "alpha": 0.015,
-            "sortino": 1.0,
-            "mdd": 0.12,
-            "hit_rate": 0.52,
-            "val_alpha": 0.008,
-            "val_sortino": 0.85,
-        },
-        {
-            "date": "2024-01-19",
-            "universe": "U3",
-            "alpha": 0.01,
-            "sortino": 0.95,
-            "mdd": 0.09,
-            "hit_rate": 0.51,
-            "val_alpha": 0.007,
-            "val_sortino": 0.83,
-            "coverage": 0.65,
-        },
-    ]
-    metrics_path.write_text(json.dumps(history))
-
-    universe_sizes = {
-        "U1": 120,
-        "U2": 80,
-        "U3": 95,
+    registry_frames = {
+        "U1": pd.DataFrame({"symbol": list(range(12))}),
+        "U2": pd.DataFrame({"symbol": list(range(6))}),
+        "U3": pd.DataFrame({"symbol": list(range(20))}),
     }
 
-    def registry_fn(name: str):
-        count = universe_sizes.get(name, 0)
-        return pd.DataFrame({"symbol": list(range(count))})
+    def _registry(name: str) -> pd.DataFrame:
+        return registry_frames[name]
 
     spec = {
-        "version": "v0.4",
+        "version": "0.4",
         "universe_selection": {
-            "lookback_weeks": 6,
-            "min_weeks": 2,
+            "lookback_weeks": 4,
+            "min_weeks": 3,
             "weights": {
-                "alpha": 0.6,
-                "sortino": 0.2,
-                "mdd": 0.3,
-                "coverage": 0.2,
-                "turnover": 0.1,
+                "alpha": 0.4,
+                "sortino": 0.25,
+                "mdd": 0.2,
+                "coverage": 0.1,
+                "turnover": 0.05,
             },
-            "temperature": 0.8,
-            "constraints": {"min_constituents": {"U1": 100, "U2": 100, "U3": 90}},
+            "temperature": 0.7,
+            "constraints": {"min_constituents": {"U1": 10, "default": 8}},
+            "logging": {"fields": ["as_of", "winner", "coverage_now"]},
         },
     }
 
+    candidates = ["U1", "U2", "U3"]
     decision = choose_universe(
-        ["U1", "U2", "U3"],
+        candidates,
         spec["universe_selection"].get("constraints", {}),
-        registry_fn,
-        metrics_path,
+        _registry,
+        metrics_history_path,
         spec,
-        date(2024, 3, 1),
+        "2025-01-10",
     )
 
-    assert decision["winner"] in {"U1", "U2", "U3"}
-    assert isinstance(decision["rationale"], str) and decision["rationale"]
-    assert abs(sum(decision["probabilities"].values()) - 1.0) < 1e-8
+    assert decision["winner"] in candidates
+    assert decision["rationale"].startswith("Selected")
+    assert set(decision["scores"].keys()) == set(candidates)
+    assert set(decision["probabilities"].keys()) == set(candidates)
+    assert decision["coverage_now"]["U2"] == pytest.approx(6 / 8)
 
-    log_file = tmp_path / "runs" / "universe_decisions.json"
-    assert log_file.exists()
-    log_entries = json.loads(log_file.read_text())
-    assert log_entries[-1]["winner"] == decision["winner"]
-    assert log_entries[-1]["spec"] == "v0.4"
+    log_path = tmp_path / "runs" / "universe_decisions.json"
+    assert log_path.exists()
+    history_log = json.loads(log_path.read_text())
+    assert history_log[-1]["winner"] == decision["winner"]
+    assert set(history_log[-1].keys()) == {"as_of", "winner", "coverage_now"}

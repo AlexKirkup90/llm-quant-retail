@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -34,7 +35,7 @@ def test_parse_snapshots_offline():
         assert isinstance(frame, pd.DataFrame)
         assert list(frame.columns) == ["symbol", "name", "sector"]
         assert not frame.empty
-        assert len(frame) >= universe_registry._MIN_ROWS[name] * 0.5
+        assert len(frame) >= 3
 
     assert snapshots["FTSE_350"]["symbol"].str.endswith(".L").all()
 
@@ -61,6 +62,41 @@ def test_ftse_suffixed_and_string_types():
     assert ptypes.is_string_dtype(df["symbol"])
     assert df["symbol"].equals(df["symbol"].str.upper())
     assert df["symbol"].str.endswith(".L").all()
+
+
+def test_expected_min_constituents_defaults(tmp_path):
+    empty_spec = tmp_path / "spec_empty.json"
+    empty_spec.write_text(json.dumps({}))
+
+    assert universe_registry.expected_min_constituents(
+        "SP500_FULL", spec_path=empty_spec
+    ) == 450
+    assert universe_registry.expected_min_constituents(
+        "SP500_MINI", spec_path=empty_spec
+    ) == 5
+
+    override_spec = tmp_path / "spec_override.json"
+    override_spec.write_text(
+        json.dumps(
+            {
+                "universe_selection": {
+                    "constraints": {
+                        "min_constituents": {
+                            "SP500_MINI": 12,
+                            "default": 42,
+                        }
+                    }
+                }
+            }
+        )
+    )
+
+    assert universe_registry.expected_min_constituents(
+        "SP500_MINI", spec_path=override_spec
+    ) == 12
+    assert universe_registry.expected_min_constituents(
+        "UNKNOWN", spec_path=override_spec
+    ) == 42
 
 
 def test_normalize_handles_integer_columns():

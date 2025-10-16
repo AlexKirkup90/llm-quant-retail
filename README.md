@@ -36,7 +36,7 @@ historical telemetry stored in `metrics_history.json`. For each candidate
 universe the app aggregates the most recent lookback window (default: 8 weeks)
 and computes the following metrics:
 
-- Alpha, Sortino, max drawdown (`mdd`), hit rate
+- Alpha, Sortino, max drawdown (`mdd`), and hit rate
 - Validation metrics (`val_alpha`, `val_sortino`)
 - Observed coverage (fraction of required constituents available)
 - Estimated turnover cost (currently `0.0005 * turnover_fraction`)
@@ -48,19 +48,21 @@ score = w_alpha * alpha + w_sortino * sortino - w_mdd * mdd
         + w_coverage * coverage - w_turnover * turnover_cost
 ```
 
-The weights, lookback length, minimum history requirement, temperature, and
-per-universe minimum constituent constraints are defined in `spec/current_spec.json`.
-Scores are converted into selection probabilities with a softmax function using
-the configured temperature. The engine records each decision (including scores,
-probabilities, and rationale) in `runs/universe_decisions.json` for auditability.
+The weights, lookback window, minimum-history requirement, softmax temperature,
+and per-universe minimum constituent constraints are defined in
+`spec/current_spec.json`. Coverage is computed as
+`min(1.0, len(current_universe) / min_constituents)` so that sparse universes are
+penalised, and the softmax temperature keeps a controlled level of exploration.
+Every decision (candidates, scores, probabilities, rationale) is logged to
+`runs/universe_decisions.json` for auditability.
 
 ### Auto vs Manual mode
 
-The Streamlit UI now exposes a **Universe Mode** selector:
+The Streamlit UI exposes a **Universe Mode** selector:
 
 - **Auto** (default) runs the selection engine, displays a table of candidates
-  with their scores and probabilities (highlighting the chosen universe), and
-  proceeds with the winning universe for the weekly cycle.
+  with their metrics, scores, and probabilities (highlighting the winner), and
+  proceeds with the chosen universe for the weekly cycle.
 - **Manual** preserves the previous behaviour, letting you pick a universe from
   the dropdown.
 

@@ -75,10 +75,11 @@ _COLUMN_NORMALISATION = {
 }
 
 _MIN_ROWS = {
-    "SP500_FULL": 6,
-    "R1000": 8,
-    "NASDAQ_100": 6,
-    "FTSE_350": 8,
+    "SP500_FULL": 450,
+    "R1000": 800,
+    "NASDAQ_100": 90,
+    "FTSE_350": 300,
+    "SP500_MINI": 5,
 }
 
 _SPEC_MIN_CACHE: Dict[Path, Dict[str, int]] = {}
