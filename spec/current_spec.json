@@ -1,5 +1,5 @@
 {
-  "version": "v0.5",
+  "version": "0.6",
   "as_of": "2025-10-16",
   "features": [
     "live_ohlcv",
@@ -7,6 +7,12 @@
     "transaction_costs",
     "risk_controls",
     "bandit_universe_selection"
+  ],
+  "features_plus": [
+    "explainability",
+    "sector_neutral_signals",
+    "bandit_net_alpha",
+    "risk_dashboard"
   ],
   "dependencies": [
     "pandas",

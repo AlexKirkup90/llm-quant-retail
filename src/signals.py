@@ -144,6 +144,39 @@ def _normalize_weights(weights: pd.Series) -> pd.Series:
     return pd.Series(1.0 / len(weights), index=weights.index)
 
 
+def _sector_zscore(values: pd.Series) -> pd.Series:
+    values = values.astype(float)
+    std = values.std(ddof=0)
+    if std and not np.isclose(std, 0.0):
+        return (values - values.mean()) / std
+    return values * 0.0
+
+
+def sector_neutralize_features(
+    features: pd.DataFrame,
+    sectors: pd.Series | Mapping[str, str] | None,
+) -> pd.DataFrame:
+    """Apply within-sector z-scoring across all feature columns."""
+
+    if features is None or features.empty:
+        return features
+    if sectors is None:
+        return features
+
+    if not isinstance(sectors, pd.Series):
+        sectors = pd.Series(sectors)
+
+    aligned = sectors.reindex(features.index)
+    if aligned.dropna().empty:
+        return features
+
+    neutralised = features.copy()
+    for column in neutralised.columns:
+        col_values = neutralised[column]
+        neutralised[column] = col_values.groupby(aligned).transform(_sector_zscore)
+    return neutralised.fillna(0.0)
+
+
 def _infer_vol_regime(rets: pd.DataFrame) -> str:
     if isinstance(rets, pd.Series):
         rets = rets.to_frame()
@@ -333,10 +366,19 @@ def fit_rolling_ridge(
     return scaled
 
 
-def score_current(features_now: pd.DataFrame, weights: pd.Series) -> pd.Series:
+def score_current(
+    features_now: pd.DataFrame,
+    weights: pd.Series,
+    *,
+    sector_map: pd.Series | Mapping[str, str] | None = None,
+    sector_neutral: bool = False,
+) -> pd.Series:
     cols = [c for c in weights.index if c in features_now.columns]
     if not cols:
         return pd.Series(dtype=float)
-    X = features_now[cols].fillna(0.0)
+    working = features_now[cols]
+    if sector_neutral:
+        working = sector_neutralize_features(working, sector_map)
+    X = working.fillna(0.0)
     s = X.dot(weights.loc[cols])
     return s.sort_values(ascending=False).rename("score")

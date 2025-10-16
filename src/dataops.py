@@ -1,110 +1,24 @@
 import hashlib
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import Sequence
 
 import pandas as pd
 import yfinance as yf
 
-from .config import CACHE_DIR, REF_DIR
+from .config import CACHE_DIR
 from .universe import load_universe as _load_universe
 
 
-LATEST_SNAPSHOT_PATH = REF_DIR / "ohlcv_latest.csv"
-PRICES_CACHE_DIR = CACHE_DIR / "prices"
-PRICES_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-
-
-def _normalise_columns(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    df.columns = [str(c).split(" ")[-1].upper() for c in df.columns]
-    return df
-
-
-def _write_snapshot(df: pd.DataFrame) -> None:
-    if df.empty:
-        return
-    LATEST_SNAPSHOT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(LATEST_SNAPSHOT_PATH)
-
-
-def _read_snapshot() -> pd.DataFrame:
-    if not LATEST_SNAPSHOT_PATH.exists():
-        return pd.DataFrame()
-    try:
-        data = pd.read_csv(LATEST_SNAPSHOT_PATH, index_col=0, parse_dates=True)
-        return _normalise_columns(data)
-    except Exception:
-        return pd.DataFrame()
-
-
-def _cache_path(universe: str) -> Path:
-    safe = universe.replace("/", "_").lower()
-    return PRICES_CACHE_DIR / f"{safe}.parquet"
-
-
-def fetch_prices(symbols, years: int = 5, interval: str = "1d", universe: str | None = None, force_refresh: bool = False) -> pd.DataFrame:
-    """Fetch OHLCV close prices with caching and offline fallback."""
-
-    if not symbols:
-        return pd.DataFrame()
-
+def fetch_prices(symbols, years=5, interval="1d") -> pd.DataFrame:
     start = (datetime.utcnow() - timedelta(days=365 * years)).strftime("%Y-%m-%d")
     tickers = " ".join(symbols)
-    df = pd.DataFrame()
-
-    if not force_refresh:
-        cache_path = _cache_path(universe or "default")
-        if cache_path.exists():
-            try:
-                cached = pd.read_parquet(cache_path)
-                cached.index = pd.to_datetime(cached.index)
-                cached = cached.sort_index()
-                if not cached.empty:
-                    df = cached
-            except Exception:
-                df = pd.DataFrame()
-
-    if df.empty or force_refresh:
-        try:
-            live = yf.download(
-                tickers=tickers,
-                start=start,
-                interval=interval,
-                auto_adjust=True,
-                threads=True,
-                progress=False,
-            )
-            if isinstance(live, pd.Series):
-                live = live.to_frame(name="Close")
-            if isinstance(live.columns, pd.MultiIndex):
-                live = live["Close"]
-            live = live.dropna(how="all").sort_index()
-            live = _normalise_columns(live)
-            df = live
-            if not df.empty:
-                cache_path = _cache_path(universe or "default")
-                df.to_parquet(cache_path)
-                _write_snapshot(df)
-        except Exception:
-            pass
-
-    if df.empty:
-        snapshot = _read_snapshot()
-        if not snapshot.empty:
-            df = snapshot
-
-    if df.empty:
-        cache_path = _cache_path(universe or "default")
-        if cache_path.exists():
-            df = pd.read_parquet(cache_path)
-
-    if df.empty:
-        raise RuntimeError("Unable to load OHLCV data from live or cached sources")
-
-    df = df.reindex(columns=[c.upper() for c in symbols], copy=False)
+    df = yf.download(tickers=tickers, start=start, interval=interval, auto_adjust=True, threads=True)["Close"]
+    if isinstance(df, pd.Series):
+        df = df.to_frame()
     df = df.dropna(how="all").sort_index()
+    df.columns = [c.replace(" ", "") for c in df.columns]
     return df
+
 
 def load_universe(mode: str = "SP500") -> pd.DataFrame:
     return _load_universe(mode)
@@ -114,6 +28,38 @@ def cache_parquet(df: pd.DataFrame, name: str) -> str:
     path = CACHE_DIR / f"{name}.parquet"
     df.to_parquet(path)
     return str(path)
+
+
+def has_warm_price_cache(name: str, min_constituents: int = 50) -> bool:
+    """Return True when a cached parquet exists with enough symbols."""
+
+    min_constituents = max(1, int(min_constituents or 0))
+    base = str(name or "prices")
+    if base.endswith(".parquet"):
+        base = base[: -len(".parquet")]
+
+    candidates = {
+        base,
+        base.lower(),
+        f"prices_{base}",
+        f"prices_{base.lower()}",
+    }
+
+    for candidate in candidates:
+        path = CACHE_DIR / f"{candidate}.parquet"
+        if not path.exists():
+            continue
+        try:
+            frame = pd.read_parquet(path)
+        except Exception:
+            continue
+        if isinstance(frame, pd.Series):
+            width = 1
+        else:
+            width = int(getattr(frame, "shape", (0, 0))[1])
+        if width >= min_constituents:
+            return True
+    return False
 
 
 def compute_adv_from_prices_approx(prices: pd.DataFrame) -> pd.Series:

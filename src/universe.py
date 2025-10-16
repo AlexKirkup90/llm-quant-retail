@@ -36,26 +36,35 @@ class FilterMetadata:
         }
 
 
+def _standardise_symbols(df: pd.DataFrame) -> pd.DataFrame:
+    """Ensure a clean ``symbol`` column without adding extra metadata."""
+
+    working = df.copy()
+    if "symbol" not in working.columns:
+        working = working.reset_index().rename(columns={"index": "symbol"})
+    working["symbol"] = working["symbol"].astype(str).str.upper().str.strip()
+    working = working.loc[working["symbol"] != ""]
+    return working
+
+
 def _load_base(mode: str) -> pd.DataFrame:
     mode = mode.upper()
     if mode == "SP500":
         df = load_sp500_symbols()
-        df["symbol"] = df["symbol"].str.upper().str.strip()
-        return df
+        return _standardise_symbols(df)
     if mode in universe_registry.registry_list():
         try:
             df = universe_registry.load_universe(mode)
         except universe_registry.UniverseRegistryError:
             if mode == "SP500_MINI":
                 df = load_sp500_symbols().head(5).copy()
-                df["symbol"] = df["symbol"].str.upper().str.strip()
+                df = _standardise_symbols(df)
                 mini_path = REF_DIR / "sp500_mini.csv"
                 mini_path.parent.mkdir(parents=True, exist_ok=True)
                 df.to_csv(mini_path, index=False)
                 return df
             raise
-        df["symbol"] = df["symbol"].str.upper().str.strip()
-        return df
+        return _standardise_symbols(df)
     raise ValueError(f"Unknown universe mode: {mode}")
 
 
@@ -209,7 +218,7 @@ def _log_universe(mode: str, symbols: Iterable[str]) -> None:
 def _load_and_filter_universe(
     mode: str, apply_filters: bool
 ) -> Tuple[pd.DataFrame, FilterMetadata, pd.DataFrame]:
-    base = _load_base(mode)
+    base = _standardise_symbols(_load_base(mode))
     if base.empty:
         if mode != "SP500_MINI":
             raise universe_registry.UniverseRegistryError(
@@ -241,7 +250,7 @@ def load_universe_with_meta(
     if not meta.filters_applied and filtered is not None and filtered.empty:
         filtered = base
 
-    result = filtered.copy()
+    result = _standardise_symbols(filtered.copy())
     if meta.filters_applied and result.empty:
         LOGGER.warning(
             "Liquidity filters produced an empty universe for mode=%s; using raw symbols.",
@@ -263,7 +272,14 @@ def load_universe(mode: str, apply_filters: bool = True) -> pd.DataFrame:
 
     normalized_mode = (mode or "SP500").upper()
     result, meta = load_universe_with_meta(normalized_mode, apply_filters=apply_filters)
-    result.attrs["universe_filter_meta"] = meta
-    symbols = result.get("symbol", [])
+    tidy = _standardise_symbols(result)
+    for col in ("name", "sector"):
+        if col not in tidy.columns:
+            tidy[col] = ""
+    base_cols = ["symbol", "name", "sector"]
+    extra = [col for col in tidy.columns if col not in base_cols]
+    tidy = tidy[base_cols + extra]
+    tidy.attrs["universe_filter_meta"] = meta
+    symbols = tidy.get("symbol", [])
     _log_universe(normalized_mode, symbols)
-    return result
+    return tidy

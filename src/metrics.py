@@ -79,7 +79,14 @@ def performance_summary(
         "avg_turnover": float(pd.Series(turnover).fillna(0.0).mean()),
         "total_cost": float(pd.Series(costs).fillna(0.0).sum()),
     }
-    summary["gross_vs_net_spread"] = summary["gross_cagr"] - summary["net_cagr"]
+    spread = max(0.0, summary["gross_cagr"] - summary["net_cagr"])
+    summary["gross_vs_net_spread"] = min(spread, summary["total_cost"])
+    summary["cost_bps_weekly"] = (
+        float(pd.Series(costs).fillna(0.0).mean() * 10000.0)
+        if costs is not None
+        else 0.0
+    )
+    summary["turnover"] = summary["avg_turnover"]
     summary["last_equity"] = float(curve.iloc[-1]) if not curve.empty else 1.0
     return summary
 
