@@ -163,7 +163,31 @@ def main():
                 data=open(out, "rb"),
                 file_name=out.split("/")[-1],
             )
+            # === 9. Log Metrics for Evaluator ===
+            import json
 
+            metrics_record = {
+                "spec": "v0.2",
+                "date": str(as_of),
+                "alpha": float(alpha),
+                "sortino": float(sor),
+                "max_drawdown": float(mdd),
+                "hit_rate": float((port_rets > bench).mean())
+            }
+
+            metrics_file = Path("metrics_history.json")
+            if metrics_file.exists():
+                with open(metrics_file) as f:
+                    history = json.load(f)
+            else:
+                history = []
+
+            history.append(metrics_record)
+            with open(metrics_file, "w") as f:
+                json.dump(history, f, indent=2)
+
+            st.success("Metrics logged to metrics_history.json")
+        
         except Exception as e:
             st.error(f"Run failed: {e}")
 
