@@ -1,1 +1,22 @@
-
+symbol,name,sector
+AAPL,Apple Inc,Information Technology
+MSFT,Microsoft Corp,Information Technology
+GOOGL,Alphabet Inc A,Communication Services
+AMZN,Amazon.com Inc,Consumer Discretionary
+NVDA,NVIDIA Corp,Information Technology
+META,Meta Platforms Inc,Communication Services
+JPM,JP Morgan Chase & Co,Financials
+UNH,UnitedHealth Group Inc,Health Care
+PG,Procter & Gamble Co,Consumer Staples
+XOM,Exxon Mobil Corp,Energy
+CVX,Chevron Corp,Energy
+HD,Home Depot Inc,Consumer Discretionary
+KO,Coca-Cola Co,Consumer Staples
+PEP,PepsiCo Inc,Consumer Staples
+MRK,Merck & Co Inc,Health Care
+JNJ,Johnson & Johnson,Health Care
+PFE,Pfizer Inc,Health Care
+VZ,Verizon Communications Inc,Communication Services
+CSCO,Cisco Systems Inc,Information Technology
+INTC,Intel Corp,Information Technology
+# ... (add more rows up to 500 as desired)
