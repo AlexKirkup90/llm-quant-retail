@@ -16,7 +16,12 @@ if st.button("Run Weekly Cycle"):
     prices = dataops.fetch_prices(symbols + ["SPY"], years=5)
     st.write("Downloaded prices:", prices.shape)
 
-    feats = features.combine_features(prices)
+    fundamentals = dataops.fetch_fundamentals(symbols)
+    sentiment = dataops.fetch_news_sentiment(symbols)
+    st.write("Fundamental metrics:", fundamentals.shape)
+    st.write("News sentiment sample:", sentiment.head())
+
+    feats = features.combine_features(prices, fundamentals=fundamentals, sentiment=sentiment)
     feats = feats.dropna(how="all").fillna(0.0)
 
     # Make a naive forward-return target (next-week) for quick demo:
