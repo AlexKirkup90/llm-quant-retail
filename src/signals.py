@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Dict, Mapping, Sequence
 
 import numpy as np
@@ -9,24 +10,116 @@ from sklearn.linear_model import Ridge
 
 from .config import RUNS_DIR
 
-EMA_LAMBDA = 0.9
-ROLLING_WEEKS = 12
-RIDGE_ALPHA = 10.0
+# ---------------------------------------------------------------------
+# v0.3 CONFIG BRIDGE
+# Expose module attributes expected by the app (ROLLING_WEEKS, EMA_LAMBDA, RIDGE_ALPHA)
+# and allow overrides from spec/current_spec.json. Also allow regime scalers from spec.
+# ---------------------------------------------------------------------
 
-_VOL_REGIME_SCALERS: Dict[str, Dict[str, float]] = {
+# Hard defaults (used if spec missing/invalid)
+_DEFAULT_EMA_LAMBDA = 0.9
+_DEFAULT_ROLLING_WEEKS = 12
+_DEFAULT_RIDGE_ALPHA = 10.0
+
+# Default regime scalers (used unless overridden by spec)
+_DEFAULT_VOL_REGIME_SCALERS: Dict[str, Dict[str, float]] = {
     "high": {"mom_6m": 0.7, "risk_beta": 0.7},
     "med": {"mom_6m": 1.0, "risk_beta": 1.0},
     "low": {"mom_6m": 1.05, "risk_beta": 1.05},
 }
-
-_MARKET_SENTIMENT_SCALERS: Dict[str, Dict[str, float]] = {
+_DEFAULT_MARKET_SENTIMENT_SCALERS: Dict[str, Dict[str, float]] = {
     "neg": {"quality_roic": 1.2, "def_stability": 1.2},
     "pos": {"mom_6m": 1.05, "eps_rev_3m": 1.05},
     "neu": {},
 }
 
 
-def fit_ridge(features_hist: pd.DataFrame, fwd_returns: pd.Series, alpha: float = RIDGE_ALPHA) -> pd.Series:
+def _load_spec_overrides():
+    """Read spec/current_spec.json and return config overrides if present."""
+    spec_path = Path("spec/current_spec.json")
+    if not spec_path.exists():
+        return {
+            "ema_lambda": _DEFAULT_EMA_LAMBDA,
+            "rolling_weeks": _DEFAULT_ROLLING_WEEKS,
+            "ridge_alpha": _DEFAULT_RIDGE_ALPHA,
+            "vol_scalers": _DEFAULT_VOL_REGIME_SCALERS,
+            "sent_scalers": _DEFAULT_MARKET_SENTIMENT_SCALERS,
+        }
+
+    try:
+        spec = json.loads(spec_path.read_text())
+        learning = spec.get("learning", {})
+        regime_scalers = spec.get("regime_scalers", {})
+
+        ema_lambda = float(learning.get("ema_lambda", _DEFAULT_EMA_LAMBDA))
+        rolling_weeks = int(learning.get("rolling_weeks", _DEFAULT_ROLLING_WEEKS))
+        ridge_alpha = float(learning.get("ridge_alpha", _DEFAULT_RIDGE_ALPHA))
+
+        # Try to read scaler maps; fallback to defaults if keys missing
+        vol_scalers = regime_scalers.get("vol_regime", _DEFAULT_VOL_REGIME_SCALERS) or _DEFAULT_VOL_REGIME_SCALERS
+        sent_scalers = regime_scalers.get("market_sentiment", _DEFAULT_MARKET_SENTIMENT_SCALERS) or _DEFAULT_MARKET_SENTIMENT_SCALERS
+
+        return {
+            "ema_lambda": ema_lambda,
+            "rolling_weeks": rolling_weeks,
+            "ridge_alpha": ridge_alpha,
+            "vol_scalers": vol_scalers,
+            "sent_scalers": sent_scalers,
+        }
+    except Exception:
+        # On any parsing/type error, return safe defaults
+        return {
+            "ema_lambda": _DEFAULT_EMA_LAMBDA,
+            "rolling_weeks": _DEFAULT_ROLLING_WEEKS,
+            "ridge_alpha": _DEFAULT_RIDGE_ALPHA,
+            "vol_scalers": _DEFAULT_VOL_REGIME_SCALERS,
+            "sent_scalers": _DEFAULT_MARKET_SENTIMENT_SCALERS,
+        }
+
+
+# Load overrides at import time
+_cfg = _load_spec_overrides()
+
+# Public module-level attributes (what the app expects)
+EMA_LAMBDA: float = _cfg["ema_lambda"]
+ROLLING_WEEKS: int = _cfg["rolling_weeks"]
+RIDGE_ALPHA: float = _cfg["ridge_alpha"]
+
+# Internal scaler maps (may be overridden by spec)
+_VOL_REGIME_SCALERS: Dict[str, Dict[str, float]] = _cfg["vol_scalers"]
+_MARKET_SENTIMENT_SCALERS: Dict[str, Dict[str, float]] = _cfg["sent_scalers"]
+
+
+def get_learning_config() -> Dict[str, float | int]:
+    """Public helper so callers can fetch current learning config."""
+    return {
+        "ema_lambda": EMA_LAMBDA,
+        "rolling_weeks": ROLLING_WEEKS,
+        "ridge_alpha": RIDGE_ALPHA,
+    }
+
+
+# ---------------------------------------------------------------------
+# Core functions
+# ---------------------------------------------------------------------
+
+
+def fit_ridge(features_hist: pd.DataFrame, fwd_returns: pd.Series, alpha: float = None) -> pd.Series:
+    """
+    Fit a single ridge regression on the provided cross-section.
+
+    Parameters
+    ----------
+    features_hist : DataFrame
+        Cross-sectional feature snapshot (rows = tickers, cols = features).
+    fwd_returns : Series
+        Forward returns aligned by ticker.
+    alpha : float, optional
+        Ridge alpha. Defaults to RIDGE_ALPHA (from spec or defaults).
+    """
+    if alpha is None:
+        alpha = RIDGE_ALPHA
+
     df = features_hist.dropna()
     common = df.index.intersection(fwd_returns.dropna().index)
     if common.empty:
@@ -52,6 +145,8 @@ def _normalize_weights(weights: pd.Series) -> pd.Series:
 
 
 def _infer_vol_regime(rets: pd.DataFrame) -> str:
+    if isinstance(rets, pd.Series):
+        rets = rets.to_frame()
     if rets.empty:
         return "med"
     vol_series = rets.mean(axis=1).rolling(20, min_periods=5).std()
@@ -79,14 +174,19 @@ def _infer_market_sentiment(scores: Sequence[float] | None) -> str:
 
 def _apply_regime_scalers(weights: pd.Series, vol_regime: str, market_sentiment: str) -> pd.Series:
     adjusted = weights.copy()
+
+    # Vol regime scalers
     vol_map = _VOL_REGIME_SCALERS.get(vol_regime.lower(), {})
     for feature, mult in vol_map.items():
         if feature in adjusted.index:
-            adjusted.loc[feature] *= mult
+            adjusted.loc[feature] *= float(mult)
+
+    # Market sentiment scalers
     sent_map = _MARKET_SENTIMENT_SCALERS.get(market_sentiment.lower(), {})
     for feature, mult in sent_map.items():
         if feature in adjusted.index:
-            adjusted.loc[feature] *= mult
+            adjusted.loc[feature] *= float(mult)
+
     return _normalize_weights(adjusted)
 
 
@@ -98,44 +198,77 @@ def _serialise_history(history: Mapping[pd.Timestamp, pd.Series]) -> Dict[str, D
 
 
 def _extract_feature_panel(features: object) -> Dict[pd.Timestamp, pd.DataFrame]:
+    """
+    Accepts various feature containers and returns a dict of {timestamp: DataFrame}.
+    Supports:
+      - dict[timestamp -> DataFrame]
+      - DataFrame with MultiIndex (level 0 = timestamp)
+      - DataFrame with 'date' column
+      - Plain DataFrame (single snapshot); uses features.attrs['as_of'] or now()
+    """
     if isinstance(features, dict):
         return {pd.Timestamp(k): v for k, v in features.items()}
+
     if isinstance(features, pd.DataFrame) and isinstance(features.index, pd.MultiIndex):
         panels: Dict[pd.Timestamp, pd.DataFrame] = {}
         for ts in features.index.get_level_values(0).unique():
             frame = features.xs(ts, level=0)
             panels[pd.Timestamp(ts)] = frame
         return panels
+
     if isinstance(features, pd.DataFrame) and "date" in features.columns:
         panels = {}
         for ts, frame in features.groupby("date"):
             frame = frame.drop(columns=["date"])
             panels[pd.Timestamp(ts)] = frame
         return panels
+
     if isinstance(features, pd.DataFrame):
         panels = {}
         ts = getattr(features, "attrs", {}).get("as_of")
         timestamp = pd.Timestamp(ts) if ts else pd.Timestamp.utcnow()
         panels[timestamp] = features
         return panels
+
     raise TypeError("Unsupported features container")
 
 
 def fit_rolling_ridge(
     rets: pd.DataFrame | pd.Series,
     features: Mapping | pd.DataFrame,
-    weeks: int = ROLLING_WEEKS,
-    alpha: float = RIDGE_ALPHA,
+    weeks: int | None = None,
+    alpha: float | None = None,
 ) -> pd.Series:
-    """Fit rolling ridge regressions and return smoothed feature weights."""
+    """
+    Fit rolling ridge regressions and return smoothed feature weights.
 
+    Parameters
+    ----------
+    rets : DataFrame or Series
+        Forward returns panel indexed by date (rows) and tickers (columns),
+        or a Series aligned to a single cross-section.
+    features : Mapping or DataFrame
+        See _extract_feature_panel for accepted formats.
+    weeks : int, optional
+        Number of *weeks* worth of history to include. Defaults to spec/default ROLLING_WEEKS.
+    alpha : float, optional
+        Ridge alpha. Defaults to spec/default RIDGE_ALPHA.
+    """
+    if weeks is None:
+        weeks = ROLLING_WEEKS
+    if alpha is None:
+        alpha = RIDGE_ALPHA
+
+    # Ensure DataFrame with datetime index
     rets_df = rets.to_frame().T if isinstance(rets, pd.Series) else rets.copy()
     rets_df.index = pd.to_datetime(rets_df.index)
     rets_df = rets_df.sort_index()
+
     feature_panels = _extract_feature_panel(features)
     if not feature_panels:
         return pd.Series(dtype=float)
 
+    # Convert weeks to "trading days" approx for EW smoothing window
     window = max(1, int(weeks * 5))
     history: Dict[pd.Timestamp, pd.Series] = {}
 
@@ -158,10 +291,13 @@ def fit_rolling_ridge(
 
     hist_df = pd.DataFrame(history).T.sort_index()
     effective_window = min(window, len(hist_df))
+
+    # EWM alpha derived from EMA_LAMBDA; guard tiny alpha
     ema_alpha = max(1e-3, 1.0 - EMA_LAMBDA)
     smoothed = hist_df.tail(effective_window).ewm(alpha=ema_alpha, adjust=False).mean()
     latest_weights = smoothed.iloc[-1]
 
+    # Infer regimes if not explicitly provided via attrs
     vol_regime = getattr(rets, "attrs", {}).get("vol_regime") or _infer_vol_regime(rets_df)
     analyst_scores = None
     if hasattr(features, "attrs"):
@@ -175,12 +311,15 @@ def fit_rolling_ridge(
 
     scaled = _apply_regime_scalers(latest_weights, vol_regime, market_sentiment)
 
+    # Persist feature weight snapshot and history
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
     payload = {
         "updated_at": pd.Timestamp.utcnow().isoformat(),
         "vol_regime": vol_regime,
         "market_sentiment": market_sentiment,
         "ema_lambda": EMA_LAMBDA,
+        "rolling_weeks": weeks,
+        "ridge_alpha": alpha,
         "weights": {k: float(v) for k, v in scaled.items()},
         "history": _serialise_history(history),
     }
@@ -188,6 +327,7 @@ def fit_rolling_ridge(
     try:
         out_path.write_text(json.dumps(payload, indent=2))
     except Exception:
+        # never fail the run on serialization issues
         pass
 
     return scaled
