@@ -21,6 +21,13 @@
     "matplotlib",
     "streamlit"
   ],
+  "universes": [
+    "SP500_MINI",
+    "SP500_FULL",
+    "R1000",
+    "NASDAQ_100",
+    "FTSE_350"
+  ],
   "universe_modes": [
     "SP500_MINI",
     "SP500_FULL",

@@ -30,7 +30,10 @@ def test_filters_skipped_when_snapshot_missing(sample_base, monkeypatch, tmp_pat
 
     df, meta = universe.load_universe_with_meta("TEST", apply_filters=True)
 
-    assert df.equals(sample_base)
+    assert list(df.columns[:3]) == ["symbol", "name", "sector"]
+    assert df["symbol"].tolist() == sample_base["symbol"].tolist()
+    assert df["name"].tolist() == ["", "", ""]
+    assert df["sector"].tolist() == ["", "", ""]
     assert meta["filters_applied"] is False
     assert meta["raw_count"] == len(sample_base)
     assert meta["filtered_count"] == len(sample_base)
@@ -63,7 +66,10 @@ def test_filters_applied_with_valid_snapshot(sample_base, monkeypatch, tmp_path)
 def test_app_bypass_checkbox(sample_base, monkeypatch):
     df, meta = universe.load_universe_with_meta("TEST", apply_filters=False)
 
-    assert df.equals(sample_base)
+    assert list(df.columns[:3]) == ["symbol", "name", "sector"]
+    assert df["symbol"].tolist() == sample_base["symbol"].tolist()
+    assert df["name"].tolist() == ["", "", ""]
+    assert df["sector"].tolist() == ["", "", ""]
     assert meta["filters_applied"] is False
     assert meta["filtered_count"] == meta["raw_count"]
     assert "bypass" in meta["reason"].lower()

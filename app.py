@@ -1,4 +1,5 @@
 import json
+import pathlib
 import sys
 from io import StringIO
 from pathlib import Path
@@ -12,6 +13,34 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
+from src.universe import ensure_universe_schema
+from src.universe_registry import registry_list
+
+PREFERRED = ["SP500_MINI", "SP500_FULL", "R1000", "NASDAQ_100", "FTSE_350"]
+LABELS = {
+    "SP500_MINI": "S&P 500 (Mini)",
+    "SP500_FULL": "S&P 500",
+    "R1000": "Russell 1000",
+    "NASDAQ_100": "NASDAQ-100",
+    "FTSE_350": "FTSE 350",
+}
+
+
+def get_universe_choices() -> List[str]:
+    """Return preferred ordering combining registry and spec-defined universes."""
+
+    choices = sorted(set(registry_list()))
+    spec_path = pathlib.Path("spec/current_spec.json")
+    try:
+        spec = json.loads(spec_path.read_text())
+        choices = sorted(set(choices) | set(spec.get("universes", [])))
+    except Exception:
+        pass
+    ordered = [u for u in PREFERRED if u in choices]
+    ordered.extend(u for u in choices if u not in PREFERRED)
+    return ordered
+
+
 def _clean_symbol_series(series: pd.Series) -> pd.Series:
     return (
         series.astype(str)
@@ -21,16 +50,13 @@ def _clean_symbol_series(series: pd.Series) -> pd.Series:
     )
 
 
-def _resolve_symbols_from_universe(df: pd.DataFrame) -> List[str]:
+def _resolve_symbols_from_universe(df: pd.DataFrame, universe_name: str = "UNKNOWN") -> List[str]:
     """Return deduplicated symbols regardless of column/index placement."""
 
     if df is None or df.empty:
         return []
-    if "symbol" in df.columns:
-        raw = df["symbol"]
-    else:
-        raw = pd.Index(df.index, name="symbol").to_series()
-    cleaned = _clean_symbol_series(raw).dropna()
+    normalized = ensure_universe_schema(df, universe_name)
+    cleaned = _clean_symbol_series(normalized["symbol"]).dropna()
     return pd.Index(cleaned).drop_duplicates().tolist()
 
 
@@ -94,14 +120,8 @@ def main():
     as_of = st.date_input("As-of date", value=date.today(), key=k("weekly", "as_of"))
 
     selection_cfg = spec_data.get("universe_selection", {}) or {}
-    universe_choices = (
-        spec_data.get("universe_modes")
-        or spec_data.get("universe", {}).get("modes")
-        or ["SP500_MINI", "SP500_FULL", "R1000", "NASDAQ_100", "FTSE_350"]
-    )
-    default_index = (
-        universe_choices.index("SP500_FULL") if "SP500_FULL" in universe_choices else 0
-    )
+    universe_choices = get_universe_choices()
+    default_index = universe_choices.index("SP500_FULL") if "SP500_FULL" in universe_choices else 0
 
     universe_mode = st.selectbox(
         "Universe Mode",
@@ -112,7 +132,11 @@ def main():
     manual_universe = None
     if universe_mode == "manual":
         manual_universe = st.selectbox(
-            "Universe", universe_choices, index=default_index, key=k("weekly", "manual_universe")
+            "Universe",
+            universe_choices,
+            index=default_index,
+            key=k("weekly", "manual_universe"),
+            format_func=lambda u: LABELS.get(u, u),
         )
 
     apply_filters = st.checkbox(
@@ -228,6 +252,24 @@ def main():
                 st.error(f"Failed to load {selected_universe_name}: {exc}")
                 st.stop()
 
+            attrs = dict(getattr(uni, "attrs", {}))
+            uni = ensure_universe_schema(uni, selected_universe_name)
+            uni.attrs.update(attrs)
+
+            symbols = (
+                uni["symbol"]
+                .astype(str)
+                .str.upper()
+                .str.strip()
+                .replace("", pd.NA)
+                .dropna()
+                .drop_duplicates()
+                .tolist()
+            )
+            if not symbols:
+                st.error(f"No symbols resolved for universe {selected_universe_name}.")
+                st.stop()
+
             filter_meta = uni.attrs.get("universe_filter_meta", {})
             raw_count = int(filter_meta.get("raw_count", len(uni)))
             filtered_count = int(filter_meta.get("filtered_count", len(uni)))
@@ -238,7 +280,6 @@ def main():
             if filter_meta.get("reason"):
                 st.info(filter_meta.get("reason"))
 
-            symbols = _resolve_symbols_from_universe(uni)
             if "SPY" not in symbols:
                 symbols.append("SPY")
 
