@@ -342,16 +342,68 @@ def fetch_r1000(html_path: Optional[Path] = None) -> DataFrame:
         raise ValueError(f"R1000 provider failed: {exc}") from exc
 
 
-def fetch_ftse_350(html_path: Optional[Path] = None) -> DataFrame:
-    url = "https://en.wikipedia.org/wiki/FTSE_350_Index"
+def _extract_largest_symbol_table(url: str, html_path: Optional[Path]) -> DataFrame:
+    candidates = _extract_symbol_tables(url, html_path)
+    largest = max(candidates, key=lambda frame: len(frame))
+    return largest
+
+
+def _fetch_ftse_component(
+    url: str,
+    html_path: Optional[Path],
+    label: str,
+) -> DataFrame:
     try:
-        tables = _extract_symbol_tables(url, html_path)
-        normalized = [_normalize_universe_df(table, "FTSE_350") for table in tables]
-        combined = pd.concat(normalized, ignore_index=True)
-        combined = combined.drop_duplicates(subset="symbol", keep="first")
-        return combined.reset_index(drop=True)
+        table = _extract_largest_symbol_table(url, html_path)
     except ValueError as exc:
-        raise ValueError(f"FTSE_350 provider failed: {exc}") from exc
+        raise ValueError(f"{label} lookup failed: {exc}") from exc
+    return _normalize_universe_df(table, "FTSE_350")
+
+
+def fetch_ftse_350(
+    html_path: Optional[Path] = None,
+    *,
+    html_path_100: Optional[Path] = None,
+    html_path_250: Optional[Path] = None,
+) -> DataFrame:
+    url_100 = "https://en.wikipedia.org/wiki/FTSE_100_Index"
+    url_250 = "https://en.wikipedia.org/wiki/FTSE_250_Index"
+
+    if html_path is not None and html_path_100 is None and html_path_250 is None:
+        # Backwards compatibility with combined snapshot tests.
+        try:
+            tables = _extract_symbol_tables(
+                "https://en.wikipedia.org/wiki/FTSE_350_Index", html_path
+            )
+            normalized = [_normalize_universe_df(table, "FTSE_350") for table in tables]
+            combined = pd.concat(normalized, ignore_index=True)
+            combined = combined.drop_duplicates(subset="symbol", keep="first")
+            return combined.reset_index(drop=True)
+        except ValueError as exc:
+            raise ValueError(f"FTSE_350 provider failed: {exc}") from exc
+
+    errors: List[str] = []
+    frames: List[DataFrame] = []
+    components = [
+        ("FTSE 100", url_100, html_path_100),
+        ("FTSE 250", url_250, html_path_250),
+    ]
+
+    for label, url, path in components:
+        try:
+            frame = _fetch_ftse_component(url, path, label)
+        except ValueError as exc:
+            errors.append(str(exc))
+        else:
+            frames.append(frame)
+
+    if errors:
+        joined = "; ".join(errors)
+        raise ValueError(f"FTSE_350 provider failed: {joined}")
+
+    combined = pd.concat(frames, ignore_index=True)
+    combined = combined.drop_duplicates(subset="symbol", keep="first")
+    return combined.reset_index(drop=True)[["symbol", "name", "sector"]]
 
 
 _UNIVERSES: Dict[str, UniverseDefinition] = {

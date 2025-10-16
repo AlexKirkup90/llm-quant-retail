@@ -22,7 +22,8 @@ def test_parse_snapshots_offline():
             SNAPSHOT_DIR / "nasdaq100_wikipedia.html"
         ),
         "FTSE_350": universe_registry.fetch_ftse_350(
-            SNAPSHOT_DIR / "ftse350_wikipedia.html"
+            html_path_100=SNAPSHOT_DIR / "ftse100_wikipedia.html",
+            html_path_250=SNAPSHOT_DIR / "ftse250_wikipedia.html",
         ),
         "R1000": universe_registry.fetch_r1000(
             SNAPSHOT_DIR / "r1000_wikipedia.html"
@@ -36,6 +37,30 @@ def test_parse_snapshots_offline():
         assert len(frame) >= universe_registry._MIN_ROWS[name] * 0.5
 
     assert snapshots["FTSE_350"]["symbol"].str.endswith(".L").all()
+
+
+def test_ftse350_composite_offline():
+    df = universe_registry.fetch_ftse_350(
+        html_path_100=SNAPSHOT_DIR / "ftse100_wikipedia.html",
+        html_path_250=SNAPSHOT_DIR / "ftse250_wikipedia.html",
+    )
+
+    assert list(df.columns) == ["symbol", "name", "sector"]
+    assert not df.empty
+    assert len(df) >= 4
+    assert df["symbol"].str.endswith(".L").all()
+    assert df["symbol"].is_unique
+
+
+def test_ftse_suffixed_and_string_types():
+    df = universe_registry.fetch_ftse_350(
+        html_path_100=SNAPSHOT_DIR / "ftse100_wikipedia.html",
+        html_path_250=SNAPSHOT_DIR / "ftse250_wikipedia.html",
+    )
+
+    assert ptypes.is_string_dtype(df["symbol"])
+    assert df["symbol"].equals(df["symbol"].str.upper())
+    assert df["symbol"].str.endswith(".L").all()
 
 
 def test_normalize_handles_integer_columns():
@@ -84,14 +109,30 @@ def test_refresh_writes_csvs(tmp_path, monkeypatch):
         "SP500_FULL": (universe_registry.fetch_sp500_full, "sp500_wikipedia.html"),
         "R1000": (universe_registry.fetch_r1000, "r1000_wikipedia.html"),
         "NASDAQ_100": (universe_registry.fetch_nasdaq_100, "nasdaq100_wikipedia.html"),
-        "FTSE_350": (universe_registry.fetch_ftse_350, "ftse350_wikipedia.html"),
+        "FTSE_350": (
+            universe_registry.fetch_ftse_350,
+            ("ftse100_wikipedia.html", "ftse250_wikipedia.html"),
+        ),
     }
 
     for name, (fetcher, filename) in providers.items():
-        snapshot_file = SNAPSHOT_DIR / filename
+        if name == "FTSE_350":
+            file_100, file_250 = filename
 
-        def _provider(_html_path=None, *, path=snapshot_file, func=fetcher):
-            return func(path)
+            def _provider(
+                _html_path=None,
+                *,
+                func=fetcher,
+                path_100=SNAPSHOT_DIR / file_100,
+                path_250=SNAPSHOT_DIR / file_250,
+            ):
+                return func(html_path_100=path_100, html_path_250=path_250)
+
+        else:
+            snapshot_file = SNAPSHOT_DIR / filename
+
+            def _provider(_html_path=None, *, path=snapshot_file, func=fetcher):
+                return func(path)
 
         monkeypatch.setattr(
             universe_registry._UNIVERSES[name],  # type: ignore[attr-defined]
