@@ -10,6 +10,16 @@ import pandas as pd
 from .config import RUNS_DIR
 
 
+def default_benchmark(universe: str) -> str:
+    if universe in {"SP500_FULL", "R1000"}:
+        return "SPY"
+    if universe == "NASDAQ_100":
+        return "QQQ"
+    if universe == "FTSE_350":
+        return "ISF.L"
+    return "SPY"
+
+
 def equity_curve(weights_hist: pd.DataFrame, returns: pd.DataFrame) -> pd.Series:
     aligned = weights_hist.shift(1).fillna(0)  # next-day open proxy
     port_ret = (aligned * returns).sum(axis=1)
