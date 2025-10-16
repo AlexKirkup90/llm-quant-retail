@@ -7,7 +7,7 @@ from datetime import datetime, timezone, timedelta
 from html.parser import HTMLParser
 from io import StringIO
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 import pandas as pd
 import requests
@@ -18,6 +18,9 @@ from urllib3.exceptions import InsecureRequestWarning
 from urllib3.util.retry import Retry
 
 from .config import REF_DIR
+
+if TYPE_CHECKING:
+    from .universe import ensure_universe_schema
 
 LOGGER = logging.getLogger(__name__)
 
@@ -134,8 +137,14 @@ class UniverseRegistryError(RuntimeError):
     """Raised when a universe cannot be loaded from either live or cached data."""
 
 
+def _ensure_schema(df: DataFrame, name: str) -> DataFrame:
+    from .universe import ensure_universe_schema
+
+    return ensure_universe_schema(df, name)
+
+
 def registry_list() -> List[str]:
-    return list(_UNIVERSES.keys())
+    return ["SP500_MINI", "SP500_FULL", "R1000", "NASDAQ_100", "FTSE_350"]
 
 
 def _read_html(url: str, html_path: Optional[Path]) -> List[DataFrame]:
@@ -511,9 +520,11 @@ def _ensure_directory(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
 
-def _write_csv(definition: UniverseDefinition, df: DataFrame) -> None:
+def _write_csv(definition: UniverseDefinition, df: DataFrame) -> DataFrame:
+    normalized = _ensure_schema(df, definition.name)
     _ensure_directory(definition.csv_path)
-    df.to_csv(definition.csv_path, index=False)
+    normalized.to_csv(definition.csv_path, index=False)
+    return normalized
 
 
 def _load_csv(definition: UniverseDefinition) -> DataFrame:
@@ -534,7 +545,7 @@ def _load_csv(definition: UniverseDefinition) -> DataFrame:
         raise UniverseRegistryError(
             f"Cached CSV for {definition.name} is missing columns: {sorted(missing)}"
         )
-    return normalized
+    return _ensure_schema(normalized, definition.name)
 
 
 def refresh_universe(name: str, force: bool = False) -> Tuple[DataFrame, str]:
@@ -551,7 +562,7 @@ def refresh_universe(name: str, force: bool = False) -> Tuple[DataFrame, str]:
     if needs_refresh:
         try:
             df = definition.provider(None)
-            _write_csv(definition, df)
+            df = _write_csv(definition, df)
             return df, "live"
         except ValueError as exc:
             LOGGER.warning("Live refresh failed for %s: %s", name, exc)
@@ -568,7 +579,7 @@ def refresh_universe(name: str, force: bool = False) -> Tuple[DataFrame, str]:
 
 def load_universe(name: str, force_refresh: bool = False) -> DataFrame:
     df, _ = refresh_universe(name, force=force_refresh)
-    return df
+    return _ensure_schema(df, name)
 
 
 def refresh_all(force: bool = False) -> Dict[str, str]:

@@ -7,6 +7,55 @@ from typing import Dict, Iterable, Tuple
 
 import pandas as pd
 
+NORMALIZED_COLS = ["symbol", "name", "sector"]
+
+
+def ensure_universe_schema(df: pd.DataFrame, universe_name: str = "UNKNOWN") -> pd.DataFrame:
+    if df is None:
+        raise ValueError(f"Universe {universe_name} returned None")
+    working = df.copy()
+
+    if working.index.name and str(working.index.name).strip().lower() in {"symbol", "ticker", "code"}:
+        working = working.reset_index()
+    elif not isinstance(working.index, pd.RangeIndex):
+        working = working.reset_index()
+
+    cols = [str(c).strip().lower() for c in working.columns]
+    working.columns = cols
+
+    cand_symbol = [c for c in cols if c in {"symbol", "ticker", "code"}]
+    cand_name = [c for c in cols if c in {"name", "security", "company", "constituent", "issuer"}]
+    cand_sector = [
+        c
+        for c in cols
+        if c in {"sector", "gics sector", "industry", "icb sector", "icb industry"}
+    ]
+
+    out = pd.DataFrame()
+    if cand_symbol:
+        out["symbol"] = working[cand_symbol[0]].astype("string")
+    elif "index" in cols:
+        out["symbol"] = working["index"].astype("string")
+    else:
+        out["symbol"] = working.iloc[:, 0].astype("string")
+
+    if cand_name:
+        out["name"] = working[cand_name[0]].astype("string")
+    else:
+        out["name"] = pd.Series([""] * len(working), dtype="string")
+
+    if cand_sector:
+        out["sector"] = working[cand_sector[0]].astype("string")
+    else:
+        out["sector"] = pd.Series([""] * len(working), dtype="string")
+
+    out["symbol"] = out["symbol"].fillna("").str.replace(r"\s+", " ", regex=True).str.strip().str.upper()
+    out["name"] = out["name"].fillna("").str.replace(r"\s+", " ", regex=True).str.strip()
+    out["sector"] = out["sector"].fillna("").str.replace(r"\s+", " ", regex=True).str.strip()
+
+    out = out.loc[out["symbol"] != ""].drop_duplicates(subset=["symbol"], keep="first")
+    return out[NORMALIZED_COLS]
+
 from . import universe_registry
 from .config import REF_DIR, RUNS_DIR
 from .utils import load_sp500_symbols
@@ -37,14 +86,48 @@ class FilterMetadata:
 
 
 def _standardise_symbols(df: pd.DataFrame) -> pd.DataFrame:
-    """Ensure a clean ``symbol`` column without adding extra metadata."""
+    """Ensure a clean ``symbol`` column while preserving extra metadata."""
+
+    normalized = ensure_universe_schema(df)
+    if df is None or df.empty:
+        return normalized
 
     working = df.copy()
-    if "symbol" not in working.columns:
-        working = working.reset_index().rename(columns={"index": "symbol"})
-    working["symbol"] = working["symbol"].astype(str).str.upper().str.strip()
-    working = working.loc[working["symbol"] != ""]
-    return working
+    if working.index.name and str(working.index.name).strip().lower() in {"symbol", "ticker", "code"}:
+        working = working.reset_index()
+    cols = [str(c).strip().lower() for c in working.columns]
+    working.columns = cols
+
+    extras = [col for col in cols if col not in NORMALIZED_COLS]
+    if not extras:
+        return normalized
+
+    symbol_source = None
+    for candidate in ("symbol", "ticker", "code"):
+        if candidate in working.columns:
+            symbol_source = candidate
+            break
+    if symbol_source is None:
+        symbol_source = "index" if "index" in working.columns else working.columns[0]
+
+    working["__symbol_normalized__"] = (
+        working[symbol_source]
+        .astype("string")
+        .fillna("")
+        .str.replace(r"\s+", " ", regex=True)
+        .str.strip()
+        .str.upper()
+    )
+    extras_frame = working[["__symbol_normalized__", *extras]].drop_duplicates(
+        subset="__symbol_normalized__", keep="first"
+    )
+
+    merged = normalized.merge(
+        extras_frame.rename(columns={"__symbol_normalized__": "symbol"}),
+        on="symbol",
+        how="left",
+    )
+    return merged
 
 
 def _load_base(mode: str) -> pd.DataFrame:
