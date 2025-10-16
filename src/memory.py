@@ -13,7 +13,17 @@ def save_portfolio(port: dict):
     PORT_PATH.write_text(json.dumps(port, indent=2))
 
 def append_metrics(row: dict):
-    arr = []
-    if MEM_PATH.exists(): arr = json.loads(MEM_PATH.read_text())
-    arr.append(row)
-    MEM_PATH.write_text(json.dumps(arr, indent=2))
+    payload: list[dict] = []
+    if MEM_PATH.exists():
+        try:
+            existing = json.loads(MEM_PATH.read_text())
+            if isinstance(existing, list):
+                payload = existing
+            elif isinstance(existing, dict):
+                payload = [existing]
+        except json.JSONDecodeError:
+            payload = []
+    entry = dict(row)
+    entry.setdefault("version", "0.6")
+    payload.append(entry)
+    MEM_PATH.write_text(json.dumps(payload, indent=2))

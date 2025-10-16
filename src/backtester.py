@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from __future__ import annotations
-
 import json
 from dataclasses import dataclass, asdict
 from datetime import datetime
@@ -69,6 +67,8 @@ class WalkForwardBacktester:
         turnover_series: Dict[pd.Timestamp, float] = {}
         cost_series: Dict[pd.Timestamp, float] = {}
         overlay_trace: Dict[str, Dict[str, float]] = {}
+        overlay_scalers: Dict[pd.Timestamp, float] = {}
+        beta_history: Dict[pd.Timestamp, float] = {}
 
         gross_returns: List[pd.Series] = []
         net_returns: List[pd.Series] = []
@@ -108,6 +108,7 @@ class WalkForwardBacktester:
                 drawdown_limit=self.config.drawdown_limit,
             )
             overlay_trace[start.isoformat()] = overlay_state.as_dict()
+            overlay_scalers[start] = float(overlay_state.vol_scale)
 
             period_mask = (returns.index > start) & (returns.index <= end)
             period_returns = returns.loc[period_mask]
@@ -115,6 +116,9 @@ class WalkForwardBacktester:
                 continue
 
             weights_history[start] = weights
+
+            beta_vector = asset_betas.reindex(weights.index).fillna(0.0)
+            beta_history[start] = float((weights * beta_vector).sum())
 
             turnover_val = portfolio.turnover(prev_weights, weights)
             turnover_series[start] = float(turnover_val)
@@ -160,6 +164,14 @@ class WalkForwardBacktester:
             gross_returns=gross_series,
         )
 
+        avg_overlay = float(np.mean(list(overlay_scalers.values()))) if overlay_scalers else 1.0
+        avg_beta = float(np.mean(list(beta_history.values()))) if beta_history else 0.0
+        summary["overlay_scaler_mean"] = avg_overlay
+        summary["portfolio_beta_mean"] = avg_beta
+        summary["vol_realized"] = summary.get("volatility")
+        if self.config.base_bps > 0 and summary.get("total_cost", 0.0) <= 0 and not cost_series.empty:
+            summary["total_cost"] = float(cost_series.sum())
+
         result = {
             "gross_returns": gross_series,
             "net_returns": net_series,
@@ -168,6 +180,8 @@ class WalkForwardBacktester:
             "costs": cost_series,
             "summary": summary,
             "overlays": overlay_trace,
+            "overlay_scalers": pd.Series(overlay_scalers).sort_index(),
+            "portfolio_beta": pd.Series(beta_history).sort_index(),
         }
 
         if log:
@@ -182,6 +196,12 @@ class WalkForwardBacktester:
                 "stats": {
                     "gross": gross_series.describe().to_dict(),
                     "net": net_series.describe().to_dict(),
+                },
+                "overlay_scalers": {
+                    ts.isoformat(): float(val) for ts, val in overlay_scalers.items()
+                },
+                "portfolio_beta": {
+                    ts.isoformat(): float(val) for ts, val in beta_history.items()
                 },
             }
             (log_dir / name).write_text(json.dumps(payload, indent=2, sort_keys=True))

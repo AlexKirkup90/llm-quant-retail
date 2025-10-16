@@ -3,10 +3,12 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Mapping, MutableMapping, Tuple
+from typing import Callable, Dict, Iterable, List, Mapping, MutableMapping, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+
+from .config import RUNS_DIR
 
 try:  # pragma: no cover - defensive import for optional dependency graph
     from .universe_registry import expected_min_constituents as _expected_min_constituents
@@ -26,6 +28,15 @@ _METRIC_COLUMNS = [
     "coverage",
     "turnover_cost",
 ]
+
+
+def adaptive_top_k(universe_size: int) -> int:
+    """Return the adaptive Top-K cut-off for candidate universes."""
+
+    if universe_size <= 0:
+        return 0
+    base = max(25, min(60, int(round(0.10 * universe_size))))
+    return max(1, min(int(universe_size), base))
 
 
 @dataclass
@@ -80,18 +91,7 @@ def _ensure_columns(df: pd.DataFrame, columns: Iterable[str]) -> pd.DataFrame:
 def compute_universe_metrics(
     history_df: pd.DataFrame, lookback_weeks: int, min_weeks: int
 ) -> pd.DataFrame:
-    """Aggregate trailing realised metrics for each universe.
-
-    Parameters
-    ----------
-    history_df:
-        Raw metrics history with at least ``date`` and ``universe`` columns.
-    lookback_weeks:
-        Number of most recent rows per-universe to aggregate.
-    min_weeks:
-        Minimum required rows for informational purposes; sub-minimum universes
-        are still returned but labelled via ``n_weeks``.
-    """
+    """Aggregate trailing realised metrics for each universe."""
 
     if history_df is None or history_df.empty:
         empty = pd.DataFrame(columns=_METRIC_COLUMNS + ["n_weeks"])
@@ -128,15 +128,6 @@ def compute_universe_metrics(
     return metrics_df
 
 
-def adaptive_top_k(universe_size: int) -> int:
-    """Return the adaptive Top-K cut-off for candidate universes."""
-
-    if universe_size <= 0:
-        return 0
-    base = max(25, min(60, int(0.10 * universe_size)))
-    return max(1, min(universe_size, base))
-
-
 def score_universes(
     metrics_df: pd.DataFrame, weights: Mapping[str, float], temperature: float
 ) -> Tuple[pd.Series, pd.Series]:
@@ -162,11 +153,9 @@ def score_universes(
     if temp <= 0:
         temp = 1.0
 
-    # Adaptive Top-K filtering: concentrate mass on the most attractive universes
     k = adaptive_top_k(len(scores))
     if 0 < k < len(scores):
-        top_idx = scores.nlargest(k).index
-        filtered_scores = scores.loc[top_idx]
+        filtered_scores = scores.nlargest(k)
     else:
         filtered_scores = scores
 
@@ -174,7 +163,6 @@ def score_universes(
     values = np.where(np.isfinite(values), values, 0.0)
     if values.size == 0:
         probabilities = np.array([], dtype=float)
-        filtered_index = filtered_scores.index
     else:
         shifted = values / temp
         shifted -= np.max(shifted) if shifted.size else 0.0
@@ -184,11 +172,12 @@ def score_universes(
             probabilities = np.full_like(exps, 1.0 / len(exps))
         else:
             probabilities = exps / total
-        filtered_index = filtered_scores.index
 
     probs_series = pd.Series(0.0, index=scores.index, dtype=float)
-    if len(filtered_index) > 0:
-        probs_series.loc[filtered_index] = probabilities
+    if probabilities.size:
+        probs_series.loc[filtered_scores.index] = probabilities
+    elif len(probs_series) > 0:
+        probs_series[:] = 1.0 / len(probs_series)
 
     return scores.astype(float), probs_series
 
@@ -264,6 +253,72 @@ def _compute_coverage(
     return coverage
 
 
+def _bandit_settings(
+    selection_cfg: Mapping[str, object] | None, override_enabled: Optional[bool]
+) -> Tuple[bool, float, float, int]:
+    cfg = selection_cfg.get("bandit", {}) if isinstance(selection_cfg, Mapping) else {}
+    enabled = bool(cfg.get("enabled", False))
+    if override_enabled is not None:
+        enabled = bool(override_enabled)
+    alpha_prior = float(cfg.get("alpha_prior", 1.0))
+    beta_prior = float(cfg.get("beta_prior", 1.0))
+    min_obs = int(cfg.get("min_observations", cfg.get("min_weeks", 3)))
+    return enabled, alpha_prior, beta_prior, max(1, min_obs)
+
+
+def _compute_bandit_posteriors(
+    history_df: pd.DataFrame,
+    candidates: Iterable[str],
+    alpha_prior: float,
+    beta_prior: float,
+) -> Tuple[Dict[str, Dict[str, float]], pd.Series, pd.Series]:
+    if history_df is None or history_df.empty or "net_alpha" not in history_df.columns:
+        empty = pd.Series(dtype=float)
+        return {}, empty, empty
+
+    posteriors: Dict[str, Dict[str, float]] = {}
+    means: Dict[str, float] = {}
+    counts: Dict[str, float] = {}
+
+    net_alpha = pd.to_numeric(history_df.get("net_alpha"), errors="coerce")
+    history_df = history_df.assign(net_alpha=net_alpha)
+
+    for name in candidates:
+        group = history_df.loc[history_df["universe"] == name, "net_alpha"].dropna()
+        observations = int(len(group))
+        successes = int((group > 0).sum())
+        failures = int(observations - successes)
+        alpha_post = float(alpha_prior + successes)
+        beta_post = float(beta_prior + failures)
+        total = alpha_post + beta_post
+        mean = float(alpha_post / total) if total > 0 else 0.0
+        posteriors[name] = {
+            "alpha": alpha_post,
+            "beta": beta_post,
+            "observations": observations,
+            "successes": successes,
+        }
+        means[name] = mean
+        counts[name] = observations
+
+    return posteriors, pd.Series(means), pd.Series(counts)
+
+
+def _persist_bandit_state(posteriors: Dict[str, Dict[str, float]], active: bool) -> None:
+    path = RUNS_DIR / "universe_bandit.json"
+    payload = {
+        "updated_at": pd.Timestamp.utcnow().isoformat(),
+        "active": bool(active),
+        "posteriors": {
+            name: {key: float(value) for key, value in stats.items()} for name, stats in posteriors.items()
+        },
+    }
+    try:
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True))
+    except Exception:  # pragma: no cover - disk issues should not break selection
+        pass
+
+
 def choose_universe(
     candidates: List[str],
     constraints: Dict[str, object],
@@ -271,6 +326,9 @@ def choose_universe(
     metrics_history_path: Path,
     spec: Dict[str, object],
     as_of,
+    *,
+    bandit_enabled: Optional[bool] = None,
+    rng: Optional[np.random.Generator] = None,
 ) -> Dict[str, object]:
     selection_cfg = (spec or {}).get("universe_selection", {}) or {}
     lookback_weeks = int(selection_cfg.get("lookback_weeks", selection_cfg.get("lookback", 8)))
@@ -296,51 +354,52 @@ def choose_universe(
             metrics_df.at[name, "coverage"] = coverage_now.get(name, 0.0)
     metrics_df["turnover_cost"] = metrics_df["turnover_cost"].fillna(0.0)
 
-    base_scores, _ = score_universes(metrics_df, weights, temperature)
-    if base_scores.empty:
-        base_scores = pd.Series(0.0, index=pd.Index(candidates, name="universe"))
+    scores, probabilities = score_universes(metrics_df, weights, temperature)
+    if scores.empty:
+        scores = pd.Series(0.0, index=pd.Index(candidates, name="universe"))
+        probabilities = pd.Series(
+            [1.0 / len(candidates)] * len(candidates),
+            index=pd.Index(candidates, name="universe"),
+        )
 
-    stability = (1.0 - metrics_df["mdd"].fillna(0.0)).clip(lower=0.0)
-    coverage_series = metrics_df["coverage"].fillna(0.0)
-    turnover_penalty = metrics_df["turnover_cost"].fillna(0.0)
-    weeks = metrics_df["n_weeks"].fillna(0.0).clip(lower=1.0)
-    total_weeks = float(max(weeks.max(), 1.0))
-    exploration = np.sqrt(np.log(total_weeks + 1.0) / weeks)
-    bandit_bonus = 0.1 * stability + 0.05 * coverage_series - 0.05 * turnover_penalty + 0.05 * exploration
+    enabled, alpha_prior, beta_prior, min_obs = _bandit_settings(selection_cfg, bandit_enabled)
+    bandit_info = {"active": False, "probabilities": {}, "posteriors": {}}
+    if enabled:
+        posteriors, means, counts = _compute_bandit_posteriors(
+            history_df, candidates, alpha_prior, beta_prior
+        )
+        bandit_series = pd.Series(1.0, index=pd.Index(candidates, name="universe"), dtype=float)
+        if posteriors:
+            bandit_info["posteriors"] = {
+                name: {
+                    "alpha": float(stats["alpha"]),
+                    "beta": float(stats["beta"]),
+                    "observations": int(stats["observations"]),
+                    "successes": int(stats["successes"]),
+                }
+                for name, stats in posteriors.items()
+            }
+            bandit_active = len(counts) > 0 and counts.min() >= min_obs
+            bandit_series = means.reindex(probabilities.index).fillna(0.0)
+            if bandit_series.sum() <= 0:
+                bandit_series = pd.Series(1.0, index=bandit_series.index)
+            bandit_series = bandit_series / bandit_series.sum()
+            if bandit_active:
+                bandit_info["active"] = True
+                combined = probabilities.fillna(0.0) * bandit_series
+                total = combined.sum()
+                if total <= 0:
+                    combined = bandit_series
+                    total = combined.sum()
+                probabilities = combined / total if total > 0 else bandit_series
+        bandit_series = bandit_series.reindex(probabilities.index).fillna(0.0)
+        total_bandit = bandit_series.sum()
+        if total_bandit > 0:
+            bandit_series = bandit_series / total_bandit
+        bandit_info["probabilities"] = bandit_series.to_dict()
+        if posteriors:
+            _persist_bandit_state(posteriors, bandit_info["active"])
 
-    combined_scores = base_scores.add(bandit_bonus, fill_value=0.0)
-
-    temp = float(temperature or 1.0)
-    if temp <= 0:
-        temp = 1.0
-
-    k = adaptive_top_k(len(combined_scores))
-    if 0 < k < len(combined_scores):
-        top_idx = combined_scores.nlargest(k).index
-    else:
-        top_idx = combined_scores.index
-
-    values = combined_scores.loc[top_idx].to_numpy(dtype=float)
-    values = np.where(np.isfinite(values), values, 0.0)
-    if values.size:
-        values = values / temp
-        values -= np.max(values)
-        exps = np.exp(values)
-        total = float(exps.sum())
-        if total <= 0:
-            probs = np.full_like(exps, 1.0 / len(exps))
-        else:
-            probs = exps / total
-    else:
-        probs = np.array([], dtype=float)
-
-    probabilities = pd.Series(0.0, index=combined_scores.index, dtype=float)
-    if len(top_idx) > 0 and probs.size:
-        probabilities.loc[top_idx] = probs
-    elif len(probabilities) > 0:
-        probabilities[:] = 1.0 / len(probabilities)
-
-    scores = combined_scores
     winner = str(probabilities.idxmax()) if not probabilities.empty else candidates[0]
 
     row = metrics_df.loc[winner]
@@ -385,8 +444,6 @@ def choose_universe(
         rationale=rationale,
         parameters={
             "temperature": temperature,
-            "bandit_bonus_mean": float(bandit_bonus.mean()) if len(bandit_bonus) else 0.0,
-            "bandit_bonus_max": float(bandit_bonus.max()) if len(bandit_bonus) else 0.0,
             **{f"w_{k}": float(v) for k, v in weights.items()},
         },
         metrics=metrics_df,
@@ -420,4 +477,5 @@ def choose_universe(
         "parameters": decision.parameters,
         "lookback_weeks": decision.lookback_weeks,
         "min_weeks": decision.min_weeks,
+        "bandit": bandit_info,
     }
