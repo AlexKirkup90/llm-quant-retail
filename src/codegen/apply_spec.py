@@ -17,10 +17,29 @@ def write_changes(changes):
 def run_ci_locally():
     subprocess.check_call([sys.executable, "-m", "pytest", "-q"])
 
+def _load_json(path):
+    path_obj = Path(path)
+    if not path_obj.exists():
+        return None
+    raw = path_obj.read_text().strip()
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid JSON in {path}: {exc}") from exc
+
+
 def main(spec_path="spec/current_spec.json", changes_path="spec/changes.json"):
-    spec = json.loads(Path(spec_path).read_text())
+    spec = _load_json(spec_path)
+    if not spec:
+        print(f"No spec found at {spec_path}; nothing to apply.")
+        return
     validate_spec(spec)
-    changes = json.loads(Path(changes_path).read_text())
+    changes = _load_json(changes_path) or {}
+    if not changes:
+        print(f"No changes requested in {changes_path}; nothing to apply.")
+        return
     write_changes(changes)
     run_ci_locally()
     print("OK")
