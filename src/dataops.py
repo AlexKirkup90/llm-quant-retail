@@ -29,6 +29,18 @@ def cache_parquet(df: pd.DataFrame, name: str) -> str:
     return str(path)
 
 
+def compute_adv_from_prices_approx(prices: pd.DataFrame) -> pd.Series:
+    """Return an approximate ADV series when dollar volume metadata is available."""
+
+    meta = getattr(prices, "attrs", {}) or {}
+    dollar_volume = meta.get("daily_dollar_volume")
+    if isinstance(dollar_volume, pd.Series):
+        return dollar_volume
+    if isinstance(dollar_volume, dict):
+        return pd.Series(dollar_volume)
+    return pd.Series(index=getattr(prices, "columns", None), dtype="float64")
+
+
 def _stable_int(symbol: str) -> int:
     """Create a deterministic integer from a ticker symbol."""
     digest = hashlib.sha256(symbol.encode("utf-8")).hexdigest()
