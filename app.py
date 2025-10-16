@@ -95,7 +95,7 @@ def main():
                     candidates = universe_choices
                 constraints = selection_cfg.get("constraints", {}) or {}
                 decision_info = universe_selector.choose_universe(
-                    candidates,
+                    list(candidates),
                     constraints,
                     universe_registry.load_universe,
                     Path("metrics_history.json"),
@@ -131,6 +131,7 @@ def main():
 
             if decision_info:
                 metrics_table = decision_info["metrics"].copy()
+                metrics_table = metrics_table.reindex(decision_info.get("candidates", metrics_table.index))
                 display_cols = [
                     "alpha",
                     "sortino",
@@ -143,8 +144,10 @@ def main():
                     if col not in metrics_table.columns:
                         metrics_table[col] = np.nan
                 summary_df = metrics_table[display_cols].copy()
-                summary_df["score"] = pd.Series(decision_info["scores"])
-                summary_df["probability"] = pd.Series(decision_info["probabilities"])
+                score_series = pd.Series(decision_info["scores"])
+                prob_series = pd.Series(decision_info["probabilities"])
+                summary_df["score"] = score_series.reindex(summary_df.index)
+                summary_df["probability"] = prob_series.reindex(summary_df.index)
                 summary_df = summary_df.fillna(0.0)
 
                 def _highlight(row):
@@ -340,8 +343,12 @@ def main():
             )
             # === 9. Log Metrics for Evaluator ===
             val = metrics.val_metrics(port_rets, bench)
+            spec_version = str(spec_data.get("version", "0.4"))
+            if not spec_version.startswith("v"):
+                spec_version = f"v{spec_version}"
+
             metrics_record = {
-                "spec": str(spec_data.get("version", "v0.4")),
+                "spec": spec_version,
                 "date": str(as_of),
                 "alpha": float(alpha),
                 "sortino": float(sor),
