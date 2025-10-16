@@ -3,6 +3,8 @@
   "as_of": "2025-10-16",
   "regime": "Moderate Risk-On / Easing Bias",
   "max_update_per_feature": 0.1,
+  "universe": {},
+  "data": {},
   "features": {
     "mom_6m": {
       "description": "6-month total return momentum",
@@ -45,6 +47,10 @@
       "source": "fundamentals_stub"
     }
   },
+  "weights": {},
+  "risk": {},
+  "evaluation": {},
+  "change_proposal": "",
   "notes": [
     "Risk-on regime favors momentum, EPS revision, and liquidity.",
     "Moderate weights on quality and sentiment; slight penalty to beta.",

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Sequence
 
 import numpy as np
 import pandas as pd
+
+from . import fundamentals_stub, sentiment_stub
 
 
 def pct_change_n(prices: pd.DataFrame, n: int) -> pd.DataFrame:
@@ -57,6 +59,57 @@ def news_sentiment_signal(sentiment: pd.Series) -> pd.Series:
     return signal.rename("news_sentiment")
 
 
+def eps_rev_3m(symbols: Sequence[str], stub: Optional[pd.DataFrame] = None) -> pd.Series:
+    """Sector-neutral 3M EPS revision using deterministic fundamentals stub."""
+
+    data = fundamentals_stub.load(symbols) if stub is None else stub
+    if data.empty:
+        return pd.Series(dtype=float, name="eps_rev_3m")
+
+    eps = data["eps_rev_3m"].astype(float)
+    sectors = data.get("sector")
+
+    if sectors is not None:
+        z = eps.groupby(sectors).transform(lambda x: _standardize(x))
+    else:
+        z = _standardize(eps)
+    return z.fillna(0.0).rename("eps_rev_3m")
+
+
+def liq_adv(symbols: Sequence[str], stub: Optional[pd.DataFrame] = None) -> pd.Series:
+    """Log ADV z-score from deterministic stub fundamentals."""
+
+    data = fundamentals_stub.load(symbols) if stub is None else stub
+    if data.empty or "avg_dollar_vol_30d" not in data:
+        return pd.Series(dtype=float, name="liq_adv")
+
+    adv = np.log(pd.Series(data["avg_dollar_vol_30d"], dtype=float).clip(lower=1.0))
+    return _standardize(adv).rename("liq_adv")
+
+
+def def_stability(symbols: Sequence[str], stub: Optional[pd.DataFrame] = None) -> pd.Series:
+    """Inverse 90-day earnings volatility (higher = more stable)."""
+
+    data = fundamentals_stub.load(symbols) if stub is None else stub
+    if data.empty or "earnings_vol_90d" not in data:
+        return pd.Series(dtype=float, name="def_stability")
+
+    vol = pd.Series(data["earnings_vol_90d"], dtype=float).replace(0, np.nan)
+    inv_vol = 1.0 / vol
+    return _standardize(inv_vol.fillna(0.0)).rename("def_stability")
+
+
+def news_sent(symbols: Sequence[str], stub: Optional[pd.Series] = None, window: int = 7) -> pd.Series:
+    """7-day trailing mean sentiment score normalized to z-score."""
+
+    data = sentiment_stub.load(symbols, window=window) if stub is None else stub
+    if data is None or data.empty:
+        return pd.Series(dtype=float, name="news_sent")
+
+    bounded = pd.Series(data, dtype=float).clip(-1.0, 1.0)
+    return _standardize(bounded).rename("news_sent")
+
+
 def combine_features(
     prices: pd.DataFrame,
     fundamentals: Optional[pd.DataFrame] = None,
@@ -72,4 +125,18 @@ def combine_features(
     if sentiment is not None and not sentiment.empty:
         blocks.append(news_sentiment_signal(sentiment))
     feats = pd.concat(blocks, axis=1)
-    return feats.replace([np.inf, -np.inf], np.nan)
+
+    tickers = feats.index.tolist()
+    if tickers:
+        stub_data = fundamentals_stub.load(tickers)
+        sentiment_stub_series = sentiment_stub.load(tickers)
+        extra_blocks = [
+            eps_rev_3m(tickers, stub=stub_data),
+            liq_adv(tickers, stub=stub_data),
+            def_stability(tickers, stub=stub_data),
+            news_sent(tickers, stub=sentiment_stub_series),
+        ]
+        feats = pd.concat([feats] + extra_blocks, axis=1)
+
+    feats = feats.replace([np.inf, -np.inf], np.nan)
+    return feats
