@@ -25,14 +25,21 @@ def main():
         memory,
         universe,
         universe_registry,
+        universe_selector,
     )
 
     st.title("LLM-Codex Quant (S&P 500) — Weekly")
 
     as_of = st.date_input("As-of date", value=date.today())
     universe_choices = ["SP500_MINI", "SP500_FULL", "R1000", "NASDAQ_100", "FTSE_350"]
-    default_index = universe_choices.index("SP500_FULL") if "SP500_FULL" in universe_choices else 0
-    universe_mode = st.selectbox("Universe", universe_choices, index=default_index)
+    default_index = (
+        universe_choices.index("SP500_FULL") if "SP500_FULL" in universe_choices else 0
+    )
+
+    universe_mode = st.selectbox("Universe Mode", ["auto", "manual"], index=0)
+    manual_universe = None
+    if universe_mode == "manual":
+        manual_universe = st.selectbox("Universe", universe_choices, index=default_index)
 
     if st.button("Refresh universe lists now"):
         results = universe_registry.refresh_all(force=True)
@@ -73,16 +80,87 @@ def main():
 
     if st.button("Run Weekly Cycle"):
         try:
+            spec_path = Path("spec/current_spec.json")
+            spec_data = json.loads(spec_path.read_text()) if spec_path.exists() else {}
+
+            decision_info = None
+            selection_cfg = spec_data.get("universe_selection", {})
+            if universe_mode == "auto":
+                candidates = selection_cfg.get("candidates") or spec_data.get("universe", {}).get(
+                    "modes", []
+                )
+                if not candidates:
+                    candidates = universe_choices
+                constraints = selection_cfg.get("constraints", {}) or {}
+                decision_info = universe_selector.choose_universe(
+                    candidates,
+                    constraints,
+                    universe_registry.load_universe,
+                    Path("metrics_history.json"),
+                    spec_data,
+                    as_of,
+                )
+                selected_universe_name = decision_info.get("winner") or candidates[0]
+            else:
+                selected_universe_name = manual_universe or universe_choices[default_index]
+
             # === 1. Universe ===
             try:
-                uni = universe.load_universe(universe_mode)
+                uni = universe.load_universe(selected_universe_name)
             except universe_registry.UniverseRegistryError as exc:
                 st.error(str(exc))
                 st.stop()
             except Exception as exc:
-                st.error(f"Failed to load {universe_mode}: {exc}")
+                st.error(f"Failed to load {selected_universe_name}: {exc}")
                 st.stop()
+
+            if decision_info:
+                metrics_table = decision_info["metrics"].copy()
+                display_cols = [
+                    "alpha",
+                    "sortino",
+                    "mdd",
+                    "coverage",
+                    "turnover_cost",
+                    "n_weeks",
+                ]
+                for col in display_cols:
+                    if col not in metrics_table.columns:
+                        metrics_table[col] = np.nan
+                summary_df = metrics_table[display_cols].copy()
+                summary_df["score"] = pd.Series(decision_info["scores"])
+                summary_df["probability"] = pd.Series(decision_info["probabilities"])
+                summary_df = summary_df.fillna(0.0)
+
+                def _highlight(row):
+                    if row.name == selected_universe_name:
+                        return ["background-color: #0b5394; color: white"] * len(row)
+                    return [""] * len(row)
+
+                st.subheader("Universe decision (auto)")
+                st.dataframe(
+                    summary_df.style.format(
+                        {
+                            "alpha": "{:.4f}",
+                            "sortino": "{:.2f}",
+                            "mdd": "{:.2%}",
+                            "coverage": "{:.1%}",
+                            "turnover_cost": "{:.4%}",
+                            "probability": "{:.1%}",
+                            "score": "{:.4f}",
+                        }
+                    ).apply(_highlight, axis=1)
+                )
+                st.caption(decision_info.get("rationale", ""))
+
             symbols = [s for s in uni["symbol"].tolist() if isinstance(s, str)]
+            coverage_current = 0.0
+            if len(uni) > 0:
+                min_expected = universe_registry.expected_min_constituents(selected_universe_name)
+                coverage_current = (
+                    float(len(uni)) / float(min_expected) if min_expected else 0.0
+                )
+                coverage_current = float(min(1.0, coverage_current))
             if "SPY" not in symbols:
                 symbols.append("SPY")
             max_symbols = 150
@@ -94,7 +172,7 @@ def main():
             # === 2. Data ===
             try:
                 prices = dataops.fetch_prices(symbols, years=5)
-                dataops.cache_parquet(prices, f"prices_{universe_mode.lower()}")
+                dataops.cache_parquet(prices, f"prices_{selected_universe_name.lower()}")
             except Exception:
                 # fabricate dummy data if network or API fails
                 idx = pd.date_range(end=date.today(), periods=252 * 5, freq="B")
@@ -200,6 +278,10 @@ def main():
                 w_final = w1
 
             w_final = (w_final / w_final.sum()).sort_values(ascending=False)
+            try:
+                turnover_fraction = float(portfolio.turnover(last_w, w_final))
+            except Exception:
+                turnover_fraction = float(w_final.abs().sum()) if w_final is not None else 0.0
             port = {
                 "as_of": str(as_of),
                 "holdings": [{"ticker": t, "weight": float(w_final[t])} for t in w_final.index],
@@ -244,21 +326,27 @@ def main():
             # === 9. Log Metrics for Evaluator ===
             val = metrics.val_metrics(port_rets, bench)
             metrics_record = {
-                "spec": "v0.3",
+                "spec": str(spec_data.get("version", "v0.4")),
                 "date": str(as_of),
                 "alpha": float(alpha),
                 "sortino": float(sor),
-                "max_drawdown": float(mdd),
+                "mdd": float(mdd),
                 "hit_rate": float((port_rets > bench).mean()),
                 "val_sortino": float(val.get("val_sortino", float("nan"))),
                 "val_alpha": float(val.get("val_alpha", float("nan"))),
-                "universe": universe_mode,
+                "universe": selected_universe_name,
+                "coverage": float(coverage_current),
+                "turnover_cost": float(0.0005 * turnover_fraction if turnover_fraction else 0.0),
             }
 
             metrics_file = Path("metrics_history.json")
             if metrics_file.exists():
-                with open(metrics_file) as f:
-                    history = json.load(f)
+                try:
+                    history = json.loads(metrics_file.read_text())
+                    if not isinstance(history, list):
+                        history = []
+                except json.JSONDecodeError:
+                    history = []
             else:
                 history = []
 

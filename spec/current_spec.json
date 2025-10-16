@@ -1,7 +1,11 @@
 {
-  "version": "0.3",
+  "version": "0.4",
   "as_of": "2025-10-16",
-  "universe_modes": ["SP500_MINI", "SP500_FULL", "R1000"],
+  "universe_modes": [
+    "SP500_MINI",
+    "SP500_FULL",
+    "R1000"
+  ],
   "universe_filters": {
     "min_price": 3.0,
     "min_adv_usd": 5000000
@@ -14,31 +18,60 @@
   },
   "regime_scalers": {
     "vol_regime": {
-      "high": {"mom_6m": 0.7, "risk_beta": 0.7},
-      "med": {"mom_6m": 1.0, "risk_beta": 1.0},
-      "low": {"mom_6m": 1.05, "risk_beta": 1.05}
+      "high": {
+        "mom_6m": 0.7,
+        "risk_beta": 0.7
+      },
+      "med": {
+        "mom_6m": 1.0,
+        "risk_beta": 1.0
+      },
+      "low": {
+        "mom_6m": 1.05,
+        "risk_beta": 1.05
+      }
     },
     "market_sentiment": {
-      "neg": {"quality_roic": 1.2, "def_stability": 1.2},
-      "pos": {"mom_6m": 1.05, "eps_rev_3m": 1.05},
+      "neg": {
+        "quality_roic": 1.2,
+        "def_stability": 1.2
+      },
+      "pos": {
+        "mom_6m": 1.05,
+        "eps_rev_3m": 1.05
+      },
       "neu": {}
     }
   },
   "validation": {
     "split": "rolling_80_20",
-    "log_metrics": ["val_sortino", "val_alpha"]
+    "log_metrics": [
+      "val_sortino",
+      "val_alpha"
+    ]
   },
   "features": [
-    "mom_6m","eps_rev_3m","quality_roic","value_ey",
-    "news_sent","risk_beta","liq_adv","def_stability"
+    "mom_6m",
+    "eps_rev_3m",
+    "quality_roic",
+    "value_ey",
+    "news_sent",
+    "risk_beta",
+    "liq_adv",
+    "def_stability"
   ],
   "notes": [
     "Add universe loader for SP500_FULL and R1000 with CSVs under data/reference/.",
     "Apply liquidity/price filters post-merge; warn on dropped tickers.",
-    "Weights: base from rolling ridge; then apply regime scalers; then normalize."
+    "Weights: base from rolling ridge; then apply regime scalers; then normalize.",
+    "Introduce automated universe selection engine with telemetry constraints (v0.4)."
   ],
   "universe": {
-    "modes": ["SP500", "SP500_FULL", "R1000"],
+    "modes": [
+      "SP500",
+      "SP500_FULL",
+      "R1000"
+    ],
     "fallback": "SP500_MINI",
     "filters": {
       "price": 3.0,
@@ -63,7 +96,39 @@
   },
   "evaluation": {
     "validation_split": "rolling_80_20",
-    "metrics": ["sortino", "alpha", "val_sortino", "val_alpha"]
+    "metrics": [
+      "sortino",
+      "alpha",
+      "val_sortino",
+      "val_alpha"
+    ]
   },
-  "change_proposal": "Implement universe loader, adaptive weights, validation logging per v0.3"
+  "change_proposal": "Add automated universe selection engine, telemetry logging, and v0.4 spec compliance.",
+  "universe_selection": {
+    "lookback_weeks": 8,
+    "min_weeks": 4,
+    "weights": {
+      "alpha": 0.4,
+      "sortino": 0.25,
+      "mdd": 0.2,
+      "coverage": 0.1,
+      "turnover": 0.05
+    },
+    "temperature": 0.7,
+    "constraints": {
+      "min_constituents": {
+        "SP500_FULL": 500,
+        "R1000": 900,
+        "NASDAQ_100": 100,
+        "FTSE_350": 300,
+        "SP500_MINI": 125,
+        "default": 100
+      }
+    },
+    "candidates": [
+      "SP500_FULL",
+      "R1000",
+      "NASDAQ_100"
+    ]
+  }
 }

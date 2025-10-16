@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
@@ -79,6 +80,51 @@ _MIN_ROWS = {
     "NASDAQ_100": 6,
     "FTSE_350": 8,
 }
+
+_SPEC_MIN_CONSTRAINTS: Optional[Dict[str, int]] = None
+
+
+def _load_spec_min_constraints() -> Dict[str, int]:
+    global _SPEC_MIN_CONSTRAINTS
+    if _SPEC_MIN_CONSTRAINTS is not None:
+        return _SPEC_MIN_CONSTRAINTS
+
+    spec_path = Path(__file__).resolve().parent.parent / "spec" / "current_spec.json"
+    try:
+        data = json.loads(spec_path.read_text())
+        selection = data.get("universe_selection", {})
+        constraints = selection.get("constraints", {})
+        min_map = constraints.get("min_constituents", {})
+        if isinstance(min_map, dict):
+            _SPEC_MIN_CONSTRAINTS = {
+                key: int(value)
+                for key, value in min_map.items()
+                if value is not None
+            }
+        else:
+            _SPEC_MIN_CONSTRAINTS = {}
+    except (FileNotFoundError, json.JSONDecodeError, TypeError, ValueError):
+        _SPEC_MIN_CONSTRAINTS = {}
+    return _SPEC_MIN_CONSTRAINTS
+
+
+def expected_min_constituents(name: str) -> int:
+    """Return expected minimum count for a universe.
+
+    Preference order:
+        1. Spec-defined constraints (spec/current_spec.json).
+        2. Local fallback map based on historical expectations.
+        3. Default of 1 to avoid division by zero.
+    """
+
+    min_constraints = _load_spec_min_constraints()
+    if name in min_constraints:
+        return max(1, int(min_constraints[name]))
+    if "default" in min_constraints:
+        return max(1, int(min_constraints["default"]))
+    if name in _MIN_ROWS:
+        return max(1, int(_MIN_ROWS[name]))
+    return 1
 
 
 class UniverseRegistryError(RuntimeError):
