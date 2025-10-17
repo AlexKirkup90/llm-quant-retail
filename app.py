@@ -873,6 +873,9 @@ def main():
             key=k("bt", "regime"),
         )
 
+        if "abort_bt" not in st.session_state:
+            st.session_state["abort_bt"] = False
+
         turnover_cap = 0.40
         rebalance_band = 0.25
 
@@ -880,15 +883,56 @@ def main():
             with st.spinner("Running walk-forward backtest..."):
                 from src.backtester import BacktestConfig, WalkForwardBacktester
 
+                st.session_state["abort_bt"] = False
+                abort_placeholder = st.empty()
+                status_placeholder = st.empty()
+                progress_placeholder = st.empty()
+                progress_state: Dict[str, object] = {"bar": None}
+
+                def _abort_backtest() -> None:
+                    st.session_state["abort_bt"] = True
+
+                abort_placeholder.button(
+                    "Abort run",
+                    key=k("bt", "abort_button"),
+                    type="secondary",
+                    on_click=_abort_backtest,
+                )
+
+                def _should_abort() -> bool:
+                    return bool(st.session_state.get("abort_bt", False))
+
+                def _progress(step: int, total: int) -> None:
+                    if total <= 0:
+                        return
+                    ratio = min(1.0, (step + 1) / float(total))
+                    if progress_state["bar"] is None:
+                        progress_state["bar"] = progress_placeholder.progress(ratio)
+                    else:
+                        bar = progress_state["bar"]
+                        try:
+                            bar.progress(ratio)
+                        except Exception:
+                            progress_state["bar"] = progress_placeholder.progress(ratio)
+                    status_placeholder.info(f"Window {step + 1}/{total}")
+
+                def _cleanup() -> None:
+                    progress_placeholder.empty()
+                    status_placeholder.empty()
+                    abort_placeholder.empty()
+                    st.session_state["abort_bt"] = False
+
                 try:
                     universe_df = universe.load_universe(
                         selected_bt_universe, apply_filters=True
                     )
                 except universe_registry.UniverseRegistryError as exc:
                     st.error(str(exc))
+                    _cleanup()
                     return
                 except Exception as exc:
                     st.error(f"Failed to load {selected_bt_universe}: {exc}")
+                    _cleanup()
                     return
 
                 attrs = dict(getattr(universe_df, "attrs", {}))
@@ -933,10 +977,12 @@ def main():
                     prices = dataops.fetch_prices(symbols, years=years)
                 except Exception as exc:
                     st.error(f"Price fetch failed: {exc}")
+                    _cleanup()
                     return
 
                 if prices.empty:
                     st.error("No price data available for backtest.")
+                    _cleanup()
                     return
 
                 prev_weights = None
@@ -1181,13 +1227,23 @@ def main():
                 )
 
                 try:
-                    result = engine.run(log=True)
+                    result = engine.run(
+                        log=True,
+                        should_abort=_should_abort,
+                        progress_callback=_progress,
+                    )
                 except Exception as exc:
                     st.error(f"Backtest failed: {exc}")
+                    _cleanup()
                     return
 
+                _cleanup()
+
                 summary = result.get("summary", {})
-                st.success("Backtest completed.")
+                if result.get("aborted"):
+                    st.warning("Backtest aborted by user.")
+                else:
+                    st.success("Backtest completed.")
                 st.json(summary)
 
                 equity_curve = result.get("equity_curve")
