@@ -580,10 +580,27 @@ def load_universe(name: str, force_refresh: bool = False) -> DataFrame:
     return _ensure_schema(df, name)
 
 
-def load_universe_normalized(universe_name: str) -> DataFrame:
-    """Loads from live/cache and ALWAYS returns cols ['symbol','name','sector'] uppercased."""
+def load_universe_normalized(
+    universe_name: str,
+    *,
+    apply_filters: bool = True,
+) -> DataFrame:
+    """Load a universe with consistent schema and upper-cased symbols.
 
-    df = load_universe(universe_name)
+    Parameters
+    ----------
+    universe_name:
+        Registry identifier for the desired universe.
+    apply_filters:
+        Whether to apply the standard liquidity filters. This mirrors the
+        ``src.universe.load_universe`` flag while still guaranteeing that the
+        returned DataFrame exposes the canonical ``['symbol', 'name', 'sector']``
+        columns.
+    """
+
+    from . import universe as _universe
+
+    df = _universe.load_universe(universe_name, apply_filters=apply_filters)
     attrs = dict(getattr(df, "attrs", {}))
     normalized = ensure_universe_schema(df, universe_name).copy()
     normalized["symbol"] = normalized["symbol"].astype(str).str.upper().str.strip()

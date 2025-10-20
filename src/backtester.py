@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 
 from . import metrics, portfolio, risk
+from .universe_registry import load_universe_normalized
 from .config import RUNS_DIR
 
 
@@ -348,6 +349,10 @@ class WalkForwardBacktester:
             gross_returns=gross_series,
         )
 
+        summary["beta_vs_benchmark"] = metrics.beta_vs_bench(
+            net_series, self.prices, self.config.benchmark
+        )
+
         avg_overlay = float(np.mean(list(overlay_scalers.values()))) if overlay_scalers else 1.0
         avg_beta = float(np.mean(list(beta_history.values()))) if beta_history else 0.0
         summary["overlay_scaler_mean"] = avg_overlay
@@ -397,3 +402,27 @@ class WalkForwardBacktester:
             result["log_path"] = str(log_dir / name)
 
         return result
+def prepare_backtest_universe(
+    universe_name: str,
+) -> Tuple[pd.DataFrame, List[str], str]:
+    """Load and normalise a backtest universe with benchmark appended."""
+
+    universe_df = load_universe_normalized(universe_name, apply_filters=True).copy()
+    symbols = (
+        universe_df["symbol"]
+        .astype(str)
+        .str.upper()
+        .str.strip()
+        .replace("", pd.NA)
+        .dropna()
+        .drop_duplicates()
+        .tolist()
+    )
+    if not symbols:
+        raise ValueError(f"No symbols resolved for universe {universe_name}")
+
+    bench = metrics.default_benchmark(universe_name)
+    if bench not in symbols:
+        symbols.append(bench)
+
+    return universe_df, symbols, bench
