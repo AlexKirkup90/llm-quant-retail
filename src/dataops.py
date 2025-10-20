@@ -1,13 +1,14 @@
 import hashlib
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Sequence
+from typing import Dict, Sequence
 
 import pandas as pd
 import yfinance as yf
 
 from .config import CACHE_DIR
 from .universe import load_universe as _load_universe
+from . import universe_registry
 
 
 def fetch_prices(symbols, years=5, interval="1d") -> pd.DataFrame:
@@ -35,19 +36,54 @@ REFERENCE_DIR = Path("data/reference")
 OHLCV_LATEST_PATH = REFERENCE_DIR / "ohlcv_latest.csv"
 
 
+def build_ohlcv_snapshot(universe: str, out_path: str) -> Dict[str, object]:
+    """Fetch full-universe OHLCV data and persist as a wide CSV."""
+
+    df = universe_registry.load_universe(universe)
+    if df is None or df.empty:
+        raise ValueError(f"Universe {universe} returned no constituents")
+
+    symbols = (
+        df.get("symbol", pd.Series(dtype=str))
+        .astype(str)
+        .str.upper()
+        .str.strip()
+        .replace("", pd.NA)
+        .dropna()
+        .drop_duplicates()
+        .tolist()
+    )
+    if not symbols:
+        raise ValueError(f"Universe {universe} returned no symbols")
+
+    prices = fetch_prices(symbols, years=5)
+    if prices.empty:
+        raise ValueError(f"Failed to download prices for {universe}")
+
+    prices = prices.sort_index().astype(float)
+    prices = prices.loc[:, ~prices.columns.duplicated()]
+
+    target = Path(out_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    prices.to_csv(target)
+
+    rows, cols = prices.shape
+    return {"rows": int(rows), "cols": int(cols), "path": str(target)}
+
+
 def load_latest_ohlcv_snapshot() -> pd.DataFrame:
     """Return the most recent OHLCV snapshot if available."""
 
     if not OHLCV_LATEST_PATH.exists():
-        return pd.DataFrame(columns=["symbol", "close"])
+        return pd.DataFrame()
     try:
-        df = pd.read_csv(OHLCV_LATEST_PATH)
+        df = pd.read_csv(OHLCV_LATEST_PATH, index_col=0, parse_dates=True)
     except Exception:
-        return pd.DataFrame(columns=["symbol", "close"])
-    if "symbol" not in df.columns:
-        return pd.DataFrame(columns=["symbol", "close"])
-    df["symbol"] = df["symbol"].astype(str).str.upper().str.strip()
-    df = df.drop_duplicates(subset=["symbol"]).reset_index(drop=True)
+        return pd.DataFrame()
+    if df.empty:
+        return pd.DataFrame()
+    df.columns = [str(col).upper().strip() for col in df.columns]
+    df = df.sort_index()
     return df
 
 
@@ -59,10 +95,10 @@ def ohlcv_snapshot_coverage(snapshot: pd.DataFrame, symbols: Sequence[str]) -> f
     requested = {str(sym).upper().strip() for sym in symbols if sym}
     if not requested:
         return 0.0
-    available = set(snapshot.get("symbol", pd.Series(dtype=str)))
+    available = {str(col).upper().strip() for col in snapshot.columns if col}
     if not available:
         return 0.0
-    covered = len(requested & {str(sym).upper().strip() for sym in available})
+    covered = len(requested & available)
     return covered / max(1, len(requested))
 
 
@@ -72,23 +108,35 @@ def write_latest_ohlcv_snapshot(prices: pd.DataFrame) -> None:
     if prices is None or prices.empty:
         return
     REFERENCE_DIR.mkdir(parents=True, exist_ok=True)
-    working = prices.ffill().tail(1)
-    if working.empty:
+    existing = load_latest_ohlcv_snapshot()
+    if not existing.empty and prices.shape[1] < existing.shape[1]:
         return
-    latest = working.iloc[0]
-    if isinstance(latest, pd.Series):
-        payload = latest.dropna().rename("close").to_frame().reset_index()
-        payload.columns = ["symbol", "close"]
-    else:
-        payload = pd.DataFrame(columns=["symbol", "close"])
-    if payload.empty:
-        return
-    payload["symbol"] = payload["symbol"].astype(str).str.upper().str.strip()
-    payload = payload.drop_duplicates(subset=["symbol"]).sort_values("symbol")
+    prices = prices.sort_index()
     try:
-        payload.to_csv(OHLCV_LATEST_PATH, index=False)
+        prices.to_csv(OHLCV_LATEST_PATH)
     except Exception:
         pass
+
+
+def latest_ohlcv_snapshot_stats() -> Dict[str, object]:
+    """Return metadata describing the most recent OHLCV snapshot."""
+
+    if not OHLCV_LATEST_PATH.exists():
+        return {}
+    snapshot = load_latest_ohlcv_snapshot()
+    if snapshot.empty:
+        return {}
+    rows, cols = snapshot.shape
+    try:
+        modified = datetime.fromtimestamp(OHLCV_LATEST_PATH.stat().st_mtime)
+    except Exception:
+        modified = None
+    return {
+        "rows": int(rows),
+        "cols": int(cols),
+        "timestamp": modified,
+        "path": str(OHLCV_LATEST_PATH),
+    }
 
 
 def has_warm_price_cache(name: str, min_constituents: int = 50) -> bool:

@@ -1,10 +1,8 @@
 import numpy as np
 import pandas as pd
-import pytest
 
 from app import _apply_runtime_cap, _ensure_benchmark_symbol
-from src import risk
-from src.metrics import default_benchmark
+from src.metrics import beta_vs_bench, default_benchmark
 
 
 def test_default_benchmark_mapping_contains_expected_universes():
@@ -21,61 +19,47 @@ def test_runtime_cap_bypassed_when_cache_warm():
     assert applied == 0
 
 
-def test_benchmark_beta_column_alignment():
-    idx = pd.date_range("2024-01-01", periods=5, freq="D")
-    returns = pd.DataFrame(
-        {
-            "AAA": [0.01, 0.0, 0.02, -0.01, 0.005],
-            "BBB": [0.015, -0.005, 0.01, 0.0, 0.007],
-            "QQQ": [0.012, -0.002, 0.008, -0.004, 0.006],
-        },
-        index=idx,
-    )
-    betas = risk.estimate_asset_betas(returns, benchmark_col="QQQ")
-    assert "AAA" in betas.index and pd.notna(betas.loc["AAA"])
-    assert "BBB" in betas.index and pd.notna(betas.loc["BBB"])
-
-
-def test_sp500_weekly_appends_spy_and_uses_beta():
+def test_benchmark_appended_after_cap():
     symbols = ["AAPL", "MSFT", "GOOGL"]
-    updated, bench = _ensure_benchmark_symbol(symbols, "SP500_FULL")
+    capped, _ = _apply_runtime_cap(symbols, cap=2, cache_warm=False, bypass_cap_if_warm=True)
+    updated, bench = _ensure_benchmark_symbol(capped, "SP500_FULL")
     assert bench == "SPY"
     assert updated[-1] == "SPY"
-    assert "SPY" in updated
-
-    rng = np.random.default_rng(0)
-    idx = pd.date_range("2024-03-01", periods=40, freq="B")
-    returns = pd.DataFrame(
-        {
-            "AAPL": rng.normal(0.01, 0.02, len(idx)),
-            "MSFT": rng.normal(0.008, 0.015, len(idx)),
-            "GOOGL": rng.normal(0.009, 0.018, len(idx)),
-            "SPY": rng.normal(0.007, 0.012, len(idx)),
-        },
-        index=idx,
-    )
-    betas = risk.estimate_asset_betas(returns, benchmark_col=bench)
-    assert float(betas.loc["AAPL"]) != 0.0
-    assert float(betas.loc["MSFT"]) != 0.0
+    assert updated.count("SPY") == 1
 
 
-def test_benchmark_not_duplicated_when_appended():
-    symbols = ["AAPL", "QQQ", "MSFT"]
-    updated, bench = _ensure_benchmark_symbol(symbols, "NASDAQ_100")
-    assert updated.count(bench) == 1
+def test_beta_vs_bench_returns_value_for_correlated_series():
+    idx = pd.date_range("2024-01-01", periods=60, freq="B")
+    bench_returns = pd.Series(0.001 + 0.0005 * np.sin(np.linspace(0, 3, len(idx))), index=idx)
+    bench_prices = (1 + bench_returns).cumprod()
+    other_returns = bench_returns * 1.1
+    other_prices = (1 + other_returns).cumprod()
+    price_wide = pd.DataFrame({"SPY": bench_prices, "AAA": other_prices})
+    port_returns = 0.6 * other_returns + 0.4 * bench_returns
+
+    beta_value = beta_vs_bench(port_returns, price_wide, "SPY")
+    assert pd.notna(beta_value)
+    assert abs(beta_value) > 0.1
 
 
-def test_beta_requires_min_overlap(caplog):
+def test_beta_vs_bench_requires_overlap(caplog):
     idx = pd.date_range("2024-01-01", periods=10, freq="B")
-    returns = pd.DataFrame({"A": np.linspace(0.01, 0.02, len(idx)), "SPY": np.linspace(0.0, 0.01, len(idx))}, index=idx)
+    bench_prices = pd.Series(np.linspace(100, 110, len(idx)), index=idx)
+    price_wide = pd.DataFrame({"SPY": bench_prices})
+    port_returns = pd.Series(np.linspace(0.0, 0.01, 5), index=idx[:5])
+
     with caplog.at_level("WARNING"):
-        betas = risk.estimate_asset_betas(returns, benchmark_col="SPY")
-    assert (betas == 0.0).all()
+        beta_value = beta_vs_bench(port_returns, price_wide, "SPY")
+    assert np.isnan(beta_value)
+    assert "insufficient overlap" in caplog.text.lower()
 
 
-def test_beta_warns_when_benchmark_missing(caplog):
-    returns = pd.DataFrame({"A": [0.01, 0.02, -0.01]})
+def test_beta_vs_bench_handles_missing_benchmark(caplog):
+    idx = pd.date_range("2024-01-01", periods=30, freq="B")
+    price_wide = pd.DataFrame({"QQQ": np.linspace(100, 130, len(idx))}, index=idx)
+    port_returns = pd.Series(np.linspace(0.0, 0.01, len(idx)), index=idx)
+
     with caplog.at_level("WARNING"):
-        betas = risk.estimate_asset_betas(returns, benchmark_col="SPY")
+        beta_value = beta_vs_bench(port_returns, price_wide, "SPY")
+    assert np.isnan(beta_value)
     assert "missing" in caplog.text.lower()
-    assert (betas == 0.0).all()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -8,6 +9,9 @@ import numpy as np
 import pandas as pd
 
 from .config import RUNS_DIR
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def default_benchmark(universe: str) -> str:
@@ -105,6 +109,35 @@ def performance_summary(
     summary["turnover"] = summary["avg_turnover"]
     summary["last_equity"] = float(curve.iloc[-1]) if not curve.empty else 1.0
     return summary
+
+
+def beta_vs_bench(port_rets: pd.Series, price_wide: pd.DataFrame, bench: str) -> float:
+    """Compute portfolio beta relative to a benchmark symbol."""
+
+    if price_wide is None or bench not in getattr(price_wide, "columns", []):
+        LOGGER.warning("Benchmark %s missing from price data", bench)
+        return float("nan")
+
+    port_series = pd.Series(port_rets).astype(float)
+    bench_prices = price_wide[bench].astype(float)
+    bench_returns = bench_prices.pct_change().astype(float)
+    aligned_port, aligned_bench = port_series.align(bench_returns, join="inner")
+    mask = aligned_port.notna() & aligned_bench.notna()
+    aligned_port = aligned_port[mask]
+    aligned_bench = aligned_bench[mask]
+    if len(aligned_port) < 26:
+        LOGGER.warning(
+            "Insufficient overlap (%d points) for beta computation", len(aligned_port)
+        )
+        return float("nan")
+    cov_df = pd.DataFrame({"port": aligned_port, "bench": aligned_bench})
+    cov_matrix = cov_df.cov()
+    bench_var = float(cov_matrix.loc["bench", "bench"])
+    if bench_var == 0 or pd.isna(bench_var):
+        LOGGER.warning("Benchmark %s variance is zero", bench)
+        return float("nan")
+    beta = float(cov_matrix.loc["port", "bench"] / bench_var)
+    return beta
 
 
 def val_split_rolling_80_20(indexed: pd.Series | pd.DataFrame, window: int = 60) -> List[Tuple[pd.Index, pd.Index]]:
