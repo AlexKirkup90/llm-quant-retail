@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, Mapping, Tuple
 
+import logging
 import numpy as np
 import pandas as pd
 
@@ -37,6 +38,9 @@ def annualised_volatility(returns: pd.Series, periods_per_year: int = 252) -> fl
     return float(vol)
 
 
+logger = logging.getLogger(__name__)
+
+
 def estimate_asset_betas(returns: pd.DataFrame, benchmark_col: str = "SPY") -> pd.Series:
     """Estimate single-factor betas versus the benchmark column."""
 
@@ -44,15 +48,37 @@ def estimate_asset_betas(returns: pd.DataFrame, benchmark_col: str = "SPY") -> p
         return pd.Series(dtype=float)
 
     if benchmark_col not in returns.columns:
+        logger.warning("Benchmark column %s missing for beta estimation", benchmark_col)
         return pd.Series(0.0, index=returns.columns)
 
-    bench = returns[benchmark_col]
-    var_bench = bench.var(ddof=0)
-    if not np.isfinite(var_bench) or np.isclose(var_bench, 0.0):
+    bench = returns[[benchmark_col]].dropna()
+    if bench.empty:
+        logger.warning("Benchmark series %s empty for beta estimation", benchmark_col)
         return pd.Series(0.0, index=returns.columns)
 
-    cov = returns.covwith(bench) if hasattr(returns, "covwith") else returns.apply(lambda col: np.cov(col, bench)[0, 1])
-    betas = cov / var_bench
+    betas: Dict[str, float] = {}
+    bench_returns = bench[benchmark_col]
+    rolling_var = bench_returns.var(ddof=0)
+    if not np.isfinite(rolling_var) or np.isclose(rolling_var, 0.0):
+        logger.warning("Benchmark series %s has zero variance; defaulting betas to 0", benchmark_col)
+        return pd.Series(0.0, index=returns.columns)
+
+    for column in returns.columns:
+        series = returns[column]
+        combined = pd.concat([series, bench_returns], axis=1, join="inner").dropna()
+        if combined.shape[0] < 26:
+            betas[column] = 0.0
+            continue
+        asset = combined.iloc[:, 0]
+        bench_aligned = combined.iloc[:, 1]
+        var_bench = bench_aligned.var(ddof=0)
+        if not np.isfinite(var_bench) or np.isclose(var_bench, 0.0):
+            logger.warning("Benchmark series %s constant over overlap; beta set to 0", benchmark_col)
+            betas[column] = 0.0
+            continue
+        cov = float(np.cov(asset, bench_aligned)[0, 1])
+        betas[column] = float(cov / var_bench) if var_bench else 0.0
+
     return pd.Series(betas).fillna(0.0)
 
 

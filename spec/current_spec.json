@@ -1,5 +1,5 @@
 {
-  "version": "0.7",
+  "version": "0.8",
   "as_of": "2025-10-16",
   "features": [
     "live_ohlcv",
@@ -128,9 +128,9 @@
   },
   "signals": {
     "velocity": { "enable": true, "windows": { "mom_accel": 6, "vol_window": 20, "delta_z": 8 } },
-    "residual_alpha": { "enable": true },
+    "residual_alpha": { "enable": false },
     "adaptive_ic": { "enable": true, "alpha_ic": 0.2, "ema_lambda": 0.9, "clip": 0.5 },
-    "regime_blend": { "enable": true, "lookback_weeks": 8 }
+    "regime_blend": { "enable": true }
   },
   "evaluation": {
     "validation_split": "rolling_80_20",
@@ -170,5 +170,13 @@
       "R1000",
       "NASDAQ_100"
     ]
+  },
+  "bandit": { "reward": "alpha", "warm_start": true },
+  "portfolio": {
+    "risk_adjusted_scoring": true,
+    "dynamic_topk": { "min": 10, "max": 30 },
+    "soft_diversify": { "lambda": 0.15 },
+    "derisk_clamp": { "enable": true, "min_exposure": 0.7 },
+    "auto_band": { "enable": true, "min": 0.20, "max": 0.35 }
   }
 }
