@@ -59,6 +59,9 @@ class DummyStreamlit(ModuleType):
     def tabs(self, names):
         return [_Tab(name) for name in names]
 
+    def expander(self, *_, **__):
+        return _Tab("expander")
+
     # No-op UI helpers ---------------------------------------------------
     def title(self, *_, **__):
         return None

@@ -14,7 +14,11 @@ if str(ROOT) not in sys.path:
 
 
 from src.universe import ensure_universe_schema
-from src.universe_registry import registry_list
+from src.universe_registry import (
+    load_universe_normalized,
+    refresh_universe,
+    registry_list,
+)
 from src.metrics import default_benchmark
 
 PREFERRED = ["SP500_MINI", "SP500_FULL", "R1000", "NASDAQ_100", "FTSE_350"]
@@ -170,6 +174,23 @@ def main():
         universe_choices = get_universe_choices()
         default_index = universe_choices.index("SP500_FULL") if "SP500_FULL" in universe_choices else 0
         cache_warm_key = k("weekly", "cache_warm")
+        if cache_warm_key not in st.session_state:
+            st.session_state[cache_warm_key] = False
+
+        with st.expander("Universe controls", expanded=False):
+            sel_uni = st.selectbox(
+                "Selected universe",
+                universe_choices,
+                index=default_index,
+                key=k("wk", "uni_select"),
+                format_func=lambda u: LABELS.get(u, u),
+            )
+            if st.button("Refresh selected universe", key=k("wk", "refresh_uni")):
+                try:
+                    refresh_universe(sel_uni)
+                    st.success(f"Refreshed {sel_uni}.")
+                except Exception as exc:
+                    st.warning(f"Refresh failed: {exc}")
 
         universe_mode = st.selectbox(
             "Universe Mode",
@@ -201,28 +222,56 @@ def main():
             else "No OHLCV snapshot available."
         )
 
-        target_universe = manual_universe or "SP500_FULL"
-        if st.button(
+        rebuild_snapshot_clicked = st.button(
             "Rebuild OHLCV snapshot (full universe)",
             key=k("weekly", "rebuild_snapshot"),
-        ):
+        )
+
+        if rebuild_snapshot_clicked:
+            target_universe = manual_universe or sel_uni
+            preview = None
             try:
-                metrics_info = dataops.build_ohlcv_snapshot(
-                    target_universe,
-                    str(dataops.OHLCV_LATEST_PATH),
-                )
+                preview = load_universe_normalized(target_universe)
             except Exception as exc:
-                st.error(f"Snapshot rebuild failed: {exc}")
-            else:
-                snapshot_rows = int(metrics_info.get("rows", snapshot_rows) or 0)
-                snapshot_cols = int(metrics_info.get("cols", snapshot_cols) or 0)
-                st.session_state[cache_warm_key] = True
-                st.success(
-                    f"Warm price cache detected: {snapshot_rows} rows × {snapshot_cols} symbols"
+                st.warning(
+                    f"Snapshot rebuild fallback for {target_universe}: {exc}."
+                    " Using benchmark-only universe."
                 )
-                status_line = (
-                    f"Last OHLCV snapshot: just updated — {snapshot_rows} rows × {snapshot_cols} symbols"
+                bench_symbol = default_benchmark(target_universe)
+                preview = pd.DataFrame({"symbol": [bench_symbol], "name": [""], "sector": [""]})
+
+            if preview is not None:
+                preview_symbols = (
+                    _clean_symbol_series(preview["symbol"])
+                    .dropna()
+                    .drop_duplicates()
+                    .tolist()
                 )
+                if not preview_symbols:
+                    st.error(
+                        f"No symbols resolved for universe {target_universe}. "
+                        "Try 'Refresh selected universe' above."
+                    )
+                else:
+                    try:
+                        metrics_info = dataops.build_ohlcv_snapshot(
+                            target_universe,
+                            str(dataops.OHLCV_LATEST_PATH),
+                        )
+                    except Exception as exc:
+                        st.error(f"Snapshot rebuild failed: {exc}")
+                    else:
+                        st.session_state[cache_warm_key] = True
+                        st.session_state["cache_warm"] = True
+                        rows = int(metrics_info.get("rows", 0) or 0)
+                        cols = int(metrics_info.get("cols", 0) or 0)
+                        st.success(
+                            f"Warm price cache detected: {rows} rows × {cols} symbols"
+                        )
+                        status_line = (
+                            f"Last OHLCV snapshot: just updated — {rows} rows × {cols} symbols"
+                        )
+
         st.caption(status_line)
 
         apply_filters = st.checkbox(
@@ -369,18 +418,22 @@ def main():
                         st.write("Bandit status:")
                         st.json(bandit_info)
 
+                universe_name = selected_universe_name
                 try:
-                    uni = universe.load_universe(selected_universe_name, apply_filters=apply_filters)
-                except universe_registry.UniverseRegistryError as exc:
-                    st.error(str(exc))
-                    st.stop()
+                    uni = load_universe_normalized(universe_name)
                 except Exception as exc:
-                    st.error(f"Failed to load {selected_universe_name}: {exc}")
+                    st.error(f"Failed to load {universe_name}: {exc}")
                     st.stop()
 
                 attrs = dict(getattr(uni, "attrs", {}))
-                uni = ensure_universe_schema(uni, selected_universe_name)
                 uni.attrs.update(attrs)
+                if not apply_filters:
+                    uni.attrs["universe_filter_meta"] = {
+                        "raw_count": len(uni),
+                        "filtered_count": len(uni),
+                        "reason": "Liquidity filters bypassed via apply_filters=False.",
+                        "filters_applied": False,
+                    }
 
                 symbols = (
                     uni["symbol"]
@@ -399,7 +452,10 @@ def main():
                             uni.set_index("symbol")["sector"].astype(str).str.upper().replace("", pd.NA)
                         )
                 if not symbols:
-                    st.error(f"No symbols resolved for universe {selected_universe_name}.")
+                    st.error(
+                        "No symbols resolved for universe "
+                        f"{universe_name}. Try 'Refresh selected universe' above."
+                    )
                     st.stop()
 
                 filter_meta = uni.attrs.get("universe_filter_meta", {})
@@ -423,7 +479,7 @@ def main():
                 cache_warm_flag = bool(st.session_state.get(cache_warm_key, False))
 
                 effective_warm = warm_price_cache or cache_warm_flag
-                capped_symbols_pre, _ = _apply_runtime_cap(
+                symbols_effective, _ = _apply_runtime_cap(
                     symbols,
                     runtime_cap,
                     effective_warm,
@@ -445,25 +501,28 @@ def main():
                     )
                 elif warm_price_cache:
                     st.success("Warm price cache detected.")
-                if not capped_symbols_pre:
-                    st.error(f"No symbols resolved for universe {selected_universe_name}.")
+                if not symbols_effective:
+                    st.error(f"No symbols resolved for universe {universe_name}.")
                     st.stop()
 
-                capped_symbols, benchmark_symbol = _ensure_benchmark_symbol(
-                    capped_symbols_pre, selected_universe_name
-                )
+                bench = default_benchmark(universe_name)
+                if bench not in symbols_effective:
+                    symbols_effective = symbols_effective + [bench]
+                benchmark_symbol = bench
                 benchmark_label = BENCHMARK_LABELS.get(benchmark_symbol, benchmark_symbol)
 
                 years = spec_data.get("data", {}).get("price_years", 5)
                 try:
-                    prices = dataops.fetch_prices(capped_symbols, years=years)
+                    prices = dataops.fetch_prices(symbols_effective, years=years)
                     dataops.cache_parquet(prices, cache_key)
                     dataops.write_latest_ohlcv_snapshot(prices)
                 except Exception as exc:
                     st.warning(f"Price fetch failed ({exc}); generating fallback series.")
                     idx = pd.date_range(end=pd.Timestamp(as_of), periods=252 * 5, freq="B")
-                    random_walk = np.cumprod(1 + np.random.randn(len(idx), len(capped_symbols)) * 0.001, axis=0)
-                    prices = pd.DataFrame(random_walk, index=idx, columns=capped_symbols)
+                    random_walk = np.cumprod(
+                        1 + np.random.randn(len(idx), len(symbols_effective)) * 0.001, axis=0
+                    )
+                    prices = pd.DataFrame(random_walk, index=idx, columns=symbols_effective)
                     dataops.write_latest_ohlcv_snapshot(prices)
 
                 if prices.empty:

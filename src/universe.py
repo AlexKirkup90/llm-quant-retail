@@ -11,18 +11,18 @@ NORMALIZED_COLS = ["symbol", "name", "sector"]
 
 
 def ensure_universe_schema(df: pd.DataFrame, universe_name: str = "UNKNOWN") -> pd.DataFrame:
-    if df is None:
-        raise ValueError(f"Universe {universe_name} returned None")
-    working = df.copy()
+    if df is None or df.empty:
+        raise ValueError(f"Universe {universe_name} returned empty DataFrame")
 
-    if working.index.name and str(working.index.name).strip().lower() in {"symbol", "ticker", "code"}:
-        working = working.reset_index()
-    elif not isinstance(working.index, pd.RangeIndex):
-        working = working.reset_index()
+    # reset index if tickers stored there
+    if df.index.name and str(df.index.name).strip().lower() in {"symbol", "ticker", "code"}:
+        df = df.reset_index()
 
-    cols = [str(c).strip().lower() for c in working.columns]
-    working.columns = cols
+    cols = [str(c).strip().lower() for c in df.columns]
+    df = df.copy()
+    df.columns = cols
 
+    # candidates
     cand_symbol = [c for c in cols if c in {"symbol", "ticker", "code"}]
     cand_name = [c for c in cols if c in {"name", "security", "company", "constituent", "issuer"}]
     cand_sector = [
@@ -33,27 +33,29 @@ def ensure_universe_schema(df: pd.DataFrame, universe_name: str = "UNKNOWN") -> 
 
     out = pd.DataFrame()
     if cand_symbol:
-        out["symbol"] = working[cand_symbol[0]].astype("string")
-    elif "index" in cols:
-        out["symbol"] = working["index"].astype("string")
+        out["symbol"] = df[cand_symbol[0]].astype("string")
+    elif not isinstance(df.index, pd.RangeIndex):
+        out["symbol"] = pd.Series(df.index, dtype="string")
+    elif cols:
+        out["symbol"] = df.iloc[:, 0].astype("string")
     else:
-        out["symbol"] = working.iloc[:, 0].astype("string")
+        raise ValueError(f"Universe {universe_name} has no columns")
 
-    if cand_name:
-        out["name"] = working[cand_name[0]].astype("string")
-    else:
-        out["name"] = pd.Series([""] * len(working), dtype="string")
+    out["name"] = (
+        df[cand_name[0]].astype("string") if cand_name else pd.Series([""] * len(df), dtype="string")
+    )
+    out["sector"] = (
+        df[cand_sector[0]].astype("string")
+        if cand_sector
+        else pd.Series([""] * len(df), dtype="string")
+    )
 
-    if cand_sector:
-        out["sector"] = working[cand_sector[0]].astype("string")
-    else:
-        out["sector"] = pd.Series([""] * len(working), dtype="string")
-
-    out["symbol"] = out["symbol"].fillna("").str.replace(r"\s+", " ", regex=True).str.strip().str.upper()
-    out["name"] = out["name"].fillna("").str.replace(r"\s+", " ", regex=True).str.strip()
-    out["sector"] = out["sector"].fillna("").str.replace(r"\s+", " ", regex=True).str.strip()
-
+    # clean + dedupe
+    out["symbol"] = out["symbol"].fillna("").str.upper().str.strip()
+    out["name"] = out["name"].fillna("").str.strip()
+    out["sector"] = out["sector"].fillna("").str.strip()
     out = out.loc[out["symbol"] != ""].drop_duplicates(subset=["symbol"], keep="first")
+
     return out[NORMALIZED_COLS]
 
 from . import universe_registry

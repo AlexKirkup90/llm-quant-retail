@@ -7,7 +7,7 @@ from datetime import datetime, timezone, timedelta
 from html.parser import HTMLParser
 from io import StringIO
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import Callable, Dict, List, Optional, Tuple
 
 import pandas as pd
 import requests
@@ -18,9 +18,7 @@ from urllib3.exceptions import InsecureRequestWarning
 from urllib3.util.retry import Retry
 
 from .config import REF_DIR
-
-if TYPE_CHECKING:
-    from .universe import ensure_universe_schema
+from .universe import ensure_universe_schema
 
 LOGGER = logging.getLogger(__name__)
 
@@ -582,6 +580,18 @@ def load_universe(name: str, force_refresh: bool = False) -> DataFrame:
     return _ensure_schema(df, name)
 
 
+def load_universe_normalized(universe_name: str) -> DataFrame:
+    """Loads from live/cache and ALWAYS returns cols ['symbol','name','sector'] uppercased."""
+
+    df = load_universe(universe_name)
+    attrs = dict(getattr(df, "attrs", {}))
+    normalized = ensure_universe_schema(df, universe_name).copy()
+    normalized["symbol"] = normalized["symbol"].astype(str).str.upper().str.strip()
+    normalized = normalized.drop_duplicates(subset=["symbol"], keep="first")
+    normalized.attrs.update(attrs)
+    return normalized
+
+
 def refresh_all(force: bool = False) -> Dict[str, str]:
     results: Dict[str, str] = {}
     for name in registry_list():
@@ -600,6 +610,7 @@ __all__ = [
     "fetch_r1000",
     "fetch_ftse_350",
     "load_universe",
+    "load_universe_normalized",
     "refresh_all",
     "refresh_universe",
     "registry_list",
