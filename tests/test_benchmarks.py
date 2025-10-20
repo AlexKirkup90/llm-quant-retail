@@ -1,7 +1,10 @@
 import numpy as np
 import pandas as pd
 
+import src.universe as universe_mod
+
 from app import _apply_runtime_cap, _ensure_benchmark_symbol
+from src.backtester import prepare_backtest_universe
 from src.metrics import beta_vs_bench, default_benchmark
 
 
@@ -26,6 +29,22 @@ def test_benchmark_appended_after_cap():
     assert bench == "SPY"
     assert updated[-1] == "SPY"
     assert updated.count("SPY") == 1
+
+
+def test_backtest_path_appends_benchmark(monkeypatch):
+    df = pd.DataFrame({"Ticker": ["aapl", "msft"]})
+
+    def fake_loader(name: str, apply_filters: bool = True):
+        return df
+
+    monkeypatch.setattr(universe_mod, "load_universe", fake_loader)
+
+    normalized, symbols, bench = prepare_backtest_universe("SP500_FULL")
+
+    assert list(normalized.columns) == ["symbol", "name", "sector"]
+    assert bench == "SPY"
+    assert symbols[-1] == "SPY"
+    assert symbols.count("SPY") == 1
 
 
 def test_beta_vs_bench_returns_value_for_correlated_series():

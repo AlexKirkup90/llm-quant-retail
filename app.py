@@ -370,7 +370,7 @@ def main():
                     decision_info = universe_selector.choose_universe(
                         list(candidates),
                         constraints,
-                        universe_registry.load_universe,
+                        lambda name: load_universe_normalized(name, apply_filters=True),
                         metrics_history_path,
                         spec_data,
                         str(as_of),
@@ -420,7 +420,9 @@ def main():
 
                 universe_name = selected_universe_name
                 try:
-                    uni = load_universe_normalized(universe_name)
+                    uni = load_universe_normalized(
+                        universe_name, apply_filters=bool(apply_filters)
+                    )
                 except Exception as exc:
                     st.error(f"Failed to load {universe_name}: {exc}")
                     st.stop()
@@ -941,6 +943,32 @@ def main():
                 key=k("bt", "universe"),
             )
 
+        with st.expander("Universe & Cache Controls", expanded=False):
+            if st.button("Refresh selected universe", key=k("bt", "refresh_uni")):
+                try:
+                    refresh_universe(selected_bt_universe)
+                    st.success(f"Refreshed {selected_bt_universe} from source.")
+                    st.experimental_rerun()
+                except Exception as exc:
+                    st.warning(f"Refresh failed: {exc}")
+
+            if st.button(
+                "Rebuild OHLCV snapshot (full universe)",
+                key=k("bt", "rebuild_snapshot"),
+            ):
+                try:
+                    stats = dataops.build_ohlcv_snapshot(
+                        selected_bt_universe, "data/reference/ohlcv_latest.csv"
+                    )
+                    st.session_state["cache_warm"] = True
+                    rows = int(stats.get("rows", 0) or 0)
+                    cols = int(stats.get("cols", 0) or 0)
+                    st.success(
+                        f"Snapshot rebuilt: {rows} rows × {cols} symbols for {selected_bt_universe}."
+                    )
+                except Exception as exc:
+                    st.error(f"Snapshot rebuild failed: {exc}")
+
         years = st.slider(
             "History (years)",
             min_value=3,
@@ -992,7 +1020,11 @@ def main():
 
         if st.button("Run Walk-Forward Backtest", key=k("bt", "run")):
             with st.spinner("Running walk-forward backtest..."):
-                from src.backtester import BacktestConfig, WalkForwardBacktester
+                from src.backtester import (
+                    BacktestConfig,
+                    WalkForwardBacktester,
+                    prepare_backtest_universe,
+                )
 
                 st.session_state["abort_bt"] = False
                 abort_placeholder = st.empty()
@@ -1034,8 +1066,8 @@ def main():
                     st.session_state["abort_bt"] = False
 
                 try:
-                    universe_df = universe.load_universe(
-                        selected_bt_universe, apply_filters=True
+                    universe_df, symbols, benchmark_symbol = prepare_backtest_universe(
+                        selected_bt_universe
                     )
                 except universe_registry.UniverseRegistryError as exc:
                     st.error(str(exc))
@@ -1046,22 +1078,8 @@ def main():
                     _cleanup()
                     return
 
-                attrs = dict(getattr(universe_df, "attrs", {}))
-                universe_df = ensure_universe_schema(universe_df, selected_bt_universe)
-                universe_df.attrs.update(attrs)
-
-                symbols = (
-                    universe_df["symbol"]
-                    .astype(str)
-                    .str.upper()
-                    .str.strip()
-                    .replace("", pd.NA)
-                    .dropna()
-                    .drop_duplicates()
-                    .tolist()
-                )
-                symbols, benchmark_symbol = _ensure_benchmark_symbol(
-                    symbols, selected_bt_universe
+                benchmark_label = BENCHMARK_LABELS.get(
+                    benchmark_symbol, benchmark_symbol
                 )
 
                 sector_lookup = None
