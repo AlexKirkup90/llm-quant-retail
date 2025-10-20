@@ -1,5 +1,9 @@
+from typing import Dict, Iterable, List
+
 import numpy as np
 import pandas as pd
+
+EPSILON = 1e-6
 
 
 def apply_single_name_cap(weights: pd.Series, cap: float = 0.10) -> pd.Series:
@@ -144,3 +148,141 @@ def apply_turnover_controls(
             working = blended
 
     return working.sort_values(ascending=False)
+
+
+def risk_adjust_scores(
+    scores: pd.Series,
+    returns_window: pd.DataFrame,
+    *,
+    window: int = 20,
+    epsilon: float = EPSILON,
+) -> pd.Series:
+    """Scale scores by realised volatility to emphasise risk efficiency."""
+
+    if scores is None or scores.empty:
+        return pd.Series(dtype=float)
+
+    vol = (
+        returns_window.astype(float)
+        .rolling(window, min_periods=max(2, window // 2))
+        .std()
+        .iloc[-1]
+        if not returns_window.empty
+        else pd.Series(dtype=float)
+    )
+    vol = vol.reindex(scores.index).fillna(vol.median() if not vol.empty else 0.0)
+    denom = vol.abs().clip(lower=epsilon)
+    adjusted = pd.Series(scores, dtype=float) / denom
+    adjusted = adjusted.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    return adjusted.sort_values(ascending=False)
+
+
+def select_dynamic_topk(
+    history: Iterable[pd.Series],
+    *,
+    min_k: int = 10,
+    max_k: int = 30,
+    default_k: int = 20,
+) -> int:
+    """Determine an optimal Top-K based on historical score concentration."""
+
+    min_k = int(max(1, min_k))
+    max_k = int(max(min_k, max_k))
+    default_k = int(min(max_k, max(min_k, default_k)))
+
+    history_list = [pd.Series(s).dropna().sort_values(ascending=False) for s in history]
+    history_list = [s for s in history_list if not s.empty]
+    if not history_list:
+        return default_k
+
+    metrics: Dict[int, float] = {}
+    for k in range(min_k, max_k + 1):
+        diffs: List[float] = []
+        for series in history_list:
+            if len(series) < 2:
+                continue
+            top_vals = series.head(k)
+            if top_vals.empty:
+                continue
+            mean_top = float(top_vals.mean())
+            mean_all = float(series.mean()) if len(series) else 0.0
+            diffs.append(mean_top - mean_all)
+        if diffs:
+            metrics[k] = float(np.mean(diffs))
+
+    if not metrics:
+        return default_k
+
+    best_score = max(metrics.values())
+    best_options = [k for k, v in metrics.items() if np.isclose(v, best_score)]
+    return min(best_options) if best_options else default_k
+
+
+def soft_diversified_selection(
+    scores: pd.Series,
+    corr_matrix: pd.DataFrame | None,
+    *,
+    k: int,
+    penalty: float = 0.15,
+) -> pd.Index:
+    """Select tickers greedily with a soft correlation penalty."""
+
+    working = pd.Series(scores).dropna().sort_values(ascending=False)
+    if working.empty or k <= 0:
+        return pd.Index([], dtype=object)
+
+    selected: List[str] = []
+    corr_matrix = corr_matrix if corr_matrix is not None else pd.DataFrame()
+    for _ in range(min(k, len(working))):
+        best_name = None
+        best_score = -np.inf
+        for name, base_score in working.items():
+            if name in selected:
+                continue
+            penalty_term = 0.0
+            if selected and not corr_matrix.empty and name in corr_matrix.index:
+                correlations = corr_matrix.loc[name, corr_matrix.columns.intersection(selected)]
+                if not correlations.empty:
+                    penalty_term = float(correlations.mean())
+            adjusted = float(base_score) - penalty * penalty_term
+            if adjusted > best_score:
+                best_score = adjusted
+                best_name = name
+        if best_name is None:
+            break
+        selected.append(best_name)
+    return pd.Index(selected)
+
+
+def tune_rebalance_band(
+    history: Iterable[float],
+    current_band: float,
+    *,
+    min_band: float = 0.20,
+    max_band: float = 0.35,
+    step: float = 0.05,
+) -> float:
+    """Auto-tune the rebalance band based on realised turnover history."""
+
+    values = [float(v) for v in history if np.isfinite(v)]
+    if not values:
+        return float(min(max_band, max(min_band, current_band)))
+
+    median_val = float(np.median(values))
+    band = float(current_band)
+    if median_val > 0.45:
+        band += step
+    elif median_val < 0.25:
+        band -= step
+    band = float(min(max_band, max(min_band, band)))
+    return band
+
+
+def apply_exposure_clamp(weights: pd.Series, multiplier: float) -> pd.Series:
+    """Scale weights by a gross exposure multiplier, preserving direction."""
+
+    mult = float(multiplier)
+    if not np.isfinite(mult) or mult <= 0:
+        return pd.Series(weights, dtype=float)
+    w = pd.Series(weights).astype(float)
+    return w * mult

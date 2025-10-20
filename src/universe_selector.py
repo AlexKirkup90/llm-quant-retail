@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 
 from .config import RUNS_DIR
+from . import memory
 
 try:  # pragma: no cover - defensive import for optional dependency graph
     from .universe_registry import expected_min_constituents as _expected_min_constituents
@@ -255,7 +256,7 @@ def _compute_coverage(
 
 def _bandit_settings(
     selection_cfg: Mapping[str, object] | None, override_enabled: Optional[bool]
-) -> Tuple[bool, float, float, int]:
+) -> Tuple[bool, float, float, int, Dict[str, Tuple[float, float]]]:
     cfg = selection_cfg.get("bandit", {}) if isinstance(selection_cfg, Mapping) else {}
     enabled = bool(cfg.get("enabled", False))
     if override_enabled is not None:
@@ -263,7 +264,8 @@ def _bandit_settings(
     alpha_prior = float(cfg.get("alpha_prior", 1.0))
     beta_prior = float(cfg.get("beta_prior", 1.0))
     min_obs = int(cfg.get("min_observations", cfg.get("min_weeks", 3)))
-    return enabled, alpha_prior, beta_prior, max(1, min_obs)
+    warm_priors = memory.load_bandit_posteriors()
+    return enabled, alpha_prior, beta_prior, max(1, min_obs), warm_priors
 
 
 def _compute_bandit_posteriors(
@@ -271,6 +273,7 @@ def _compute_bandit_posteriors(
     candidates: Iterable[str],
     alpha_prior: float,
     beta_prior: float,
+    warm_priors: Mapping[str, Tuple[float, float]] | None,
 ) -> Tuple[Dict[str, Dict[str, float]], pd.Series, pd.Series]:
     if history_df is None or history_df.empty or "net_alpha" not in history_df.columns:
         empty = pd.Series(dtype=float)
@@ -288,8 +291,15 @@ def _compute_bandit_posteriors(
         observations = int(len(group))
         successes = int((group > 0).sum())
         failures = int(observations - successes)
-        alpha_post = float(alpha_prior + successes)
-        beta_post = float(beta_prior + failures)
+        prior_alpha, prior_beta = (warm_priors or {}).get(name, (alpha_prior, beta_prior))
+        prior_alpha = float(prior_alpha)
+        prior_beta = float(prior_beta)
+        if prior_alpha <= 0:
+            prior_alpha = alpha_prior
+        if prior_beta <= 0:
+            prior_beta = beta_prior
+        alpha_post = float(prior_alpha + successes)
+        beta_post = float(prior_beta + failures)
         total = alpha_post + beta_post
         mean = float(alpha_post / total) if total > 0 else 0.0
         posteriors[name] = {
@@ -317,6 +327,109 @@ def _persist_bandit_state(posteriors: Dict[str, Dict[str, float]], active: bool)
         path.write_text(json.dumps(payload, indent=2, sort_keys=True))
     except Exception:  # pragma: no cover - disk issues should not break selection
         pass
+
+
+def _resolve_bandit_reward_mode(spec: Mapping[str, object] | None) -> str:
+    if not isinstance(spec, Mapping):
+        return "alpha"
+    cfg = spec.get("bandit") if isinstance(spec.get("bandit"), Mapping) else {}
+    if isinstance(cfg, Mapping):
+        mode = str(cfg.get("reward", "alpha")).lower()
+        if mode in {"alpha", "alpha_sortino"}:
+            return mode
+    return "alpha"
+
+
+def _sortino_z_score(universe: str, current_sortino: float | None, window: int = 12) -> float:
+    if current_sortino is None or not np.isfinite(current_sortino):
+        return 0.0
+    history = memory.load_bandit_trace(limit=200)
+    values: List[float] = []
+    for record in history:
+        if record.get("choice") != universe:
+            continue
+        rewards = record.get("rewards") if isinstance(record.get("rewards"), Mapping) else {}
+        if not isinstance(rewards, Mapping):
+            continue
+        value = rewards.get("sortino")
+        try:
+            value_f = float(value)
+        except (TypeError, ValueError):
+            continue
+        values.append(value_f)
+    if not values:
+        return 0.0
+    tail = values[-window:]
+    arr = np.array(tail, dtype=float)
+    if arr.size < 2:
+        return 0.0
+    std = float(arr.std(ddof=0))
+    if std <= 1e-8 or not np.isfinite(std):
+        return 0.0
+    mean = float(arr.mean())
+    return float((float(current_sortino) - mean) / std)
+
+
+def update_bandit(
+    choice: str,
+    reward: Mapping[str, float] | None,
+    date: str | pd.Timestamp,
+    *,
+    spec: Mapping[str, object] | None = None,
+    universes: Iterable[str] | None = None,
+) -> Dict[str, Tuple[float, float]]:
+    """Update the persistent bandit trace with a new observation."""
+
+    reward = reward or {}
+    try:
+        alpha_val = float(reward.get("alpha", 0.0))
+    except (TypeError, ValueError):
+        alpha_val = 0.0
+    sortino_raw = reward.get("sortino")
+    try:
+        sortino_val = float(sortino_raw)
+    except (TypeError, ValueError):
+        sortino_val = float("nan")
+    mode = _resolve_bandit_reward_mode(spec)
+    sortino_z = 0.0
+    shaped = alpha_val
+    if mode == "alpha_sortino":
+        sortino_z = _sortino_z_score(str(choice), sortino_val)
+        shaped = 0.7 * alpha_val + 0.3 * sortino_z
+
+    success = shaped >= 0
+    current_posteriors = memory.load_bandit_posteriors()
+    base_names = set(current_posteriors.keys())
+    base_names.add(str(choice))
+    if universes is not None:
+        base_names.update(str(u) for u in universes)
+
+    updated: Dict[str, Tuple[float, float]] = {}
+    for name in sorted(base_names):
+        prior_alpha, prior_beta = current_posteriors.get(name, (1.0, 1.0))
+        alpha_post = float(prior_alpha)
+        beta_post = float(prior_beta)
+        if name == str(choice):
+            if success:
+                alpha_post += 1.0
+            else:
+                beta_post += 1.0
+        updated[name] = (alpha_post, beta_post)
+
+    record = {
+        "as_of": str(date),
+        "choice": str(choice),
+        "reward_mode": mode,
+        "rewards": {
+            "alpha": alpha_val,
+            "sortino": sortino_val if np.isfinite(sortino_val) else None,
+        },
+        "reward_value": shaped,
+        "sortino_z": sortino_z,
+        "posteriors": {name: [a, b] for name, (a, b) in updated.items()},
+    }
+    memory.append_bandit_trace(record)
+    return updated
 
 
 def choose_universe(
@@ -362,20 +475,53 @@ def choose_universe(
             index=pd.Index(candidates, name="universe"),
         )
 
-    enabled, alpha_prior, beta_prior, min_obs = _bandit_settings(selection_cfg, bandit_enabled)
+    (
+        enabled,
+        alpha_prior,
+        beta_prior,
+        min_obs,
+        persistent_priors,
+    ) = _bandit_settings(selection_cfg, bandit_enabled)
     bandit_info = {"active": False, "probabilities": {}, "posteriors": {}}
     if enabled:
-        posteriors, means, counts = _compute_bandit_posteriors(
-            history_df, candidates, alpha_prior, beta_prior
-        )
+        if persistent_priors:
+            posteriors = {}
+            means_dict: Dict[str, float] = {}
+            counts_dict: Dict[str, float] = {}
+            for name in candidates:
+                alpha_post, beta_post = persistent_priors.get(name, (alpha_prior, beta_prior))
+                alpha_post = float(alpha_post)
+                beta_post = float(beta_post)
+                if alpha_post <= 0:
+                    alpha_post = alpha_prior
+                if beta_post <= 0:
+                    beta_post = beta_prior
+                total = alpha_post + beta_post
+                mean_val = float(alpha_post / total) if total > 0 else 0.0
+                observations = max(0.0, float(alpha_post + beta_post - 2.0))
+                successes = max(0.0, float(alpha_post - 1.0))
+                posteriors[name] = {
+                    "alpha": alpha_post,
+                    "beta": beta_post,
+                    "observations": int(round(observations)),
+                    "successes": int(round(successes)),
+                }
+                means_dict[name] = mean_val
+                counts_dict[name] = observations
+            means = pd.Series(means_dict)
+            counts = pd.Series(counts_dict)
+        else:
+            posteriors, means, counts = _compute_bandit_posteriors(
+                history_df, candidates, alpha_prior, beta_prior, persistent_priors
+            )
         bandit_series = pd.Series(1.0, index=pd.Index(candidates, name="universe"), dtype=float)
         if posteriors:
             bandit_info["posteriors"] = {
                 name: {
                     "alpha": float(stats["alpha"]),
                     "beta": float(stats["beta"]),
-                    "observations": int(stats["observations"]),
-                    "successes": int(stats["successes"]),
+                    "observations": int(stats.get("observations", 0)),
+                    "successes": int(stats.get("successes", 0)),
                 }
                 for name, stats in posteriors.items()
             }

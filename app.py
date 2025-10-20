@@ -1312,6 +1312,78 @@ def main():
                 f"Hit-rate: {hit_rate if hit_rate is not None else float('nan'):.2%}"
             )
 
+        st.subheader("Bandit Monitor")
+        posteriors = memory.load_bandit_posteriors()
+        if not posteriors:
+            st.info("Bandit has no recorded history yet.")
+        else:
+            table = []
+            for name, (alpha_val, beta_val) in posteriors.items():
+                total = alpha_val + beta_val
+                prob = alpha_val / total if total > 0 else 0.0
+                table.append(
+                    {
+                        "universe": name,
+                        "alpha": alpha_val,
+                        "beta": beta_val,
+                        "probability": prob,
+                        "observations": max(0.0, total - 2.0),
+                    }
+                )
+            table_df = pd.DataFrame(table).set_index("universe")
+            st.dataframe(
+                table_df.fillna(0.0).style.format(
+                    {"alpha": "{:.2f}", "beta": "{:.2f}", "probability": "{:.2%}", "observations": "{:.0f}"}
+                )
+            )
+
+            trace = memory.load_bandit_trace(limit=52)
+            if trace:
+                prob_records = []
+                reward_rows = []
+                for row in trace[-26:]:
+                    timestamp = row.get("as_of") or row.get("date")
+                    post = row.get("posteriors") if isinstance(row.get("posteriors"), dict) else {}
+                    probs = {}
+                    for name, params in post.items():
+                        if isinstance(params, (list, tuple)) and len(params) >= 2:
+                            alpha_val, beta_val = float(params[0]), float(params[1])
+                        elif isinstance(params, dict):
+                            alpha_val = float(params.get("alpha", 0.0))
+                            beta_val = float(params.get("beta", 0.0))
+                        else:
+                            continue
+                        total = alpha_val + beta_val
+                        probs[name] = alpha_val / total if total > 0 else 0.0
+                    if probs:
+                        prob_records.append((timestamp, probs))
+                    reward_value = row.get("reward_value")
+                    choice = row.get("choice")
+                    if choice and reward_value is not None:
+                        reward_rows.append((timestamp, choice, float(reward_value)))
+
+                if prob_records:
+                    prob_df = pd.DataFrame({ts: vals for ts, vals in prob_records}).T
+                    prob_df.index = pd.to_datetime(prob_df.index, errors="coerce")
+                    prob_df = prob_df.sort_index()
+                    st.caption("Selection probabilities (last 26 updates)")
+                    st.line_chart(prob_df)
+
+                if reward_rows:
+                    reward_df = pd.DataFrame(reward_rows, columns=["date", "choice", "reward"])
+                    reward_df["date"] = pd.to_datetime(reward_df["date"], errors="coerce")
+                    reward_df = reward_df.dropna(subset=["date"])
+                    reward_pivot = reward_df.pivot_table(
+                        index="date", columns="choice", values="reward", aggfunc="mean"
+                    ).sort_index()
+                    rolling = reward_pivot.rolling(4, min_periods=1).mean()
+                    st.caption("4-week moving reward (shaped)")
+                    st.line_chart(rolling)
+
+        if st.button("Reset bandit", key=k("explain", "bandit_reset")):
+            memory.reset_bandit_trace()
+            st.success("Bandit state reset to priors (1,1).")
+
     tabs = st.tabs(["Weekly", "Backtest", "Explain"])
     with tabs[0]:
         render_weekly_tab()
