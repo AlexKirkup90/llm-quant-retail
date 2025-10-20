@@ -102,6 +102,18 @@ def _apply_runtime_cap(
     return symbol_list[:effective], effective
 
 
+def _format_cap_status(total_symbols: int, runtime_cap: int, bypass_active: bool) -> Tuple[int, str]:
+    """Return the displayed count and cap label for the status line."""
+
+    try:
+        cap_value = int(runtime_cap)
+    except Exception:
+        cap_value = 0
+    if bypass_active or cap_value <= 0:
+        return total_symbols, "none"
+    return min(total_symbols, cap_value), str(cap_value)
+
+
 def _symbol_cache_key(universe_name: str) -> str:
     return f"prices_{str(universe_name).lower()}".replace("/", "_")
 
@@ -157,6 +169,7 @@ def main():
         selection_cfg = spec_data.get("universe_selection", {}) or {}
         universe_choices = get_universe_choices()
         default_index = universe_choices.index("SP500_FULL") if "SP500_FULL" in universe_choices else 0
+        cache_warm_key = k("weekly", "cache_warm")
 
         universe_mode = st.selectbox(
             "Universe Mode",
@@ -173,6 +186,44 @@ def main():
                 key=k("weekly", "manual_universe"),
                 format_func=lambda u: LABELS.get(u, u),
             )
+
+        snapshot_stats = dataops.latest_ohlcv_snapshot_stats()
+        snapshot_rows = int(snapshot_stats.get("rows", 0) or 0)
+        snapshot_cols = int(snapshot_stats.get("cols", 0) or 0)
+        snapshot_ts = snapshot_stats.get("timestamp")
+        if snapshot_ts:
+            ts_display = snapshot_ts.strftime("%Y-%m-%d %H:%M")
+        else:
+            ts_display = "unknown"
+        status_line = (
+            f"Last OHLCV snapshot: {ts_display} — {snapshot_rows} rows × {snapshot_cols} symbols"
+            if snapshot_rows and snapshot_cols
+            else "No OHLCV snapshot available."
+        )
+
+        target_universe = manual_universe or "SP500_FULL"
+        if st.button(
+            "Rebuild OHLCV snapshot (full universe)",
+            key=k("weekly", "rebuild_snapshot"),
+        ):
+            try:
+                metrics_info = dataops.build_ohlcv_snapshot(
+                    target_universe,
+                    str(dataops.OHLCV_LATEST_PATH),
+                )
+            except Exception as exc:
+                st.error(f"Snapshot rebuild failed: {exc}")
+            else:
+                snapshot_rows = int(metrics_info.get("rows", snapshot_rows) or 0)
+                snapshot_cols = int(metrics_info.get("cols", snapshot_cols) or 0)
+                st.session_state[cache_warm_key] = True
+                st.success(
+                    f"Warm price cache detected: {snapshot_rows} rows × {snapshot_cols} symbols"
+                )
+                status_line = (
+                    f"Last OHLCV snapshot: just updated — {snapshot_rows} rows × {snapshot_cols} symbols"
+                )
+        st.caption(status_line)
 
         apply_filters = st.checkbox(
             "Apply liquidity/price filters",
@@ -341,10 +392,6 @@ def main():
                     .drop_duplicates()
                     .tolist()
                 )
-                symbols, benchmark_symbol = _ensure_benchmark_symbol(
-                    symbols, selected_universe_name
-                )
-                benchmark_label = BENCHMARK_LABELS.get(benchmark_symbol, benchmark_symbol)
                 sector_lookup = None
                 if "sector" in uni.columns:
                     with pd.option_context("mode.use_inf_as_na", True):
@@ -371,36 +418,41 @@ def main():
 
                 snapshot_df = dataops.load_latest_ohlcv_snapshot()
                 snapshot_coverage = dataops.ohlcv_snapshot_coverage(snapshot_df, symbols)
-                cache_warm_key = k("weekly", "cache_warm")
                 if snapshot_coverage >= 0.80:
                     st.session_state[cache_warm_key] = True
-                    st.caption(
-                        f"OHLCV snapshot warm — coverage: {snapshot_coverage:.1%}"
-                    )
                 cache_warm_flag = bool(st.session_state.get(cache_warm_key, False))
 
                 effective_warm = warm_price_cache or cache_warm_flag
-                capped_symbols, effective_cap = _apply_runtime_cap(
+                capped_symbols_pre, _ = _apply_runtime_cap(
                     symbols,
                     runtime_cap,
                     effective_warm,
                     bypass_cap_if_cache_warm,
                 )
-                if cache_warm_flag and bypass_cap_if_cache_warm:
-                    effective_cap = 0
-                st.write(
-                    f"Effective universe for data fetch: **{len(capped_symbols)}** "
-                    f"(cap applied: {effective_cap if effective_cap else 'none'})"
+                bypass_active = effective_warm and bypass_cap_if_cache_warm
+                snapshot_rows = int(getattr(snapshot_df, "shape", (0, 0))[0])
+                snapshot_cols = int(getattr(snapshot_df, "shape", (0, 0))[1])
+                display_count, cap_label = _format_cap_status(
+                    len(symbols), runtime_cap, bypass_active
                 )
-                if cache_warm_flag and bypass_cap_if_cache_warm:
+                st.write(
+                    f"Effective universe for data fetch: **{display_count}** "
+                    f"(cap applied: {cap_label})"
+                )
+                if bypass_active and cache_warm_flag:
                     st.success(
-                        f"Full universe enabled (coverage: {snapshot_coverage:.1%})"
+                        f"Warm price cache detected: {snapshot_rows} rows × {snapshot_cols} symbols"
                     )
                 elif warm_price_cache:
                     st.success("Warm price cache detected.")
-                if not capped_symbols:
+                if not capped_symbols_pre:
                     st.error(f"No symbols resolved for universe {selected_universe_name}.")
                     st.stop()
+
+                capped_symbols, benchmark_symbol = _ensure_benchmark_symbol(
+                    capped_symbols_pre, selected_universe_name
+                )
+                benchmark_label = BENCHMARK_LABELS.get(benchmark_symbol, benchmark_symbol)
 
                 years = spec_data.get("data", {}).get("price_years", 5)
                 try:
@@ -681,10 +733,7 @@ def main():
                 net_alpha = alpha - 0.0005 * turnover_fraction
                 cost_bps_weekly = float(0.0005 * turnover_fraction * 10000.0)
 
-                beta_series = risk.estimate_asset_betas(
-                    returns_252, benchmark_col=benchmark_symbol
-                )
-                portfolio_beta = float((w_final * beta_series.reindex(w_final.index).fillna(0.0)).sum())
+                portfolio_beta = metrics.beta_vs_bench(port_rets, prices, benchmark_symbol)
                 vol_realised = risk.annualised_volatility(port_rets)
 
                 st.subheader("Weekly metrics")
@@ -696,7 +745,10 @@ def main():
 
                 st.subheader("Risk dashboard")
                 beta_col, vol_col, dd_col, scaler_col = st.columns(4)
-                beta_col.metric(f"Beta vs {benchmark_label}", f"{portfolio_beta:.2f}")
+                beta_value = "n/a"
+                if pd.notna(portfolio_beta):
+                    beta_value = f"{portfolio_beta:.2f}"
+                beta_col.metric(f"Beta vs {benchmark_label}", beta_value)
                 vol_col.metric("Realised vol", f"{vol_realised:.2%}" if pd.notna(vol_realised) else "n/a")
                 dd_col.metric("Max drawdown", f"{mdd:.2%}")
                 scaler_col.metric("Overlay scaler", "1.00")
