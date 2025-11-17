@@ -1,0 +1,103 @@
+symbol,name,sector
+ADBE,Adobe Inc.,Technology
+AMD,Advanced Micro Devices,Technology
+ABNB,Airbnb,Consumer Discretionary
+GOOGL,Alphabet Inc. (Class A),Technology
+GOOG,Alphabet Inc. (Class C),Technology
+AMZN,Amazon,Consumer Discretionary
+AEP,American Electric Power,Utilities
+AMGN,Amgen,Health Care
+ADI,Analog Devices,Technology
+AAPL,Apple Inc.,Technology
+AMAT,Applied Materials,Technology
+APP,AppLovin,Technology
+ARM,Arm Holdings,Technology
+ASML,ASML Holding,Technology
+AZN,AstraZeneca,Health Care
+TEAM,Atlassian,Technology
+ADSK,Autodesk,Technology
+ADP,Automatic Data Processing,Industrials
+AXON,Axon Enterprise,Industrials
+BKR,Baker Hughes,Energy
+BIIB,Biogen,Health Care
+BKNG,Booking Holdings,Consumer Discretionary
+AVGO,Broadcom,Technology
+CDNS,Cadence Design Systems,Technology
+CDW,CDW Corporation,Technology
+CHTR,Charter Communications,Telecommunications
+CTAS,Cintas,Industrials
+CSCO,Cisco,Telecommunications
+CCEP,Coca-Cola Europacific Partners,Consumer Staples
+CTSH,Cognizant,Technology
+CMCSA,Comcast,Telecommunications
+CEG,Constellation Energy,Utilities
+CPRT,Copart,Consumer Discretionary
+CSGP,CoStar Group,Real Estate
+COST,Costco,Consumer Discretionary
+CRWD,CrowdStrike,Technology
+CSX,CSX Corporation,Industrials
+DDOG,Datadog,Technology
+DXCM,DexCom,Health Care
+FANG,Diamondback Energy,Energy
+DASH,DoorDash,Technology
+EA,Electronic Arts,Consumer Discretionary
+EXC,Exelon,Utilities
+FAST,Fastenal,Industrials
+FTNT,Fortinet,Technology
+GEHC,GE HealthCare,Health Care
+GILD,Gilead Sciences,Health Care
+GFS,GlobalFoundries,Technology
+HON,Honeywell,Industrials
+IDXX,Idexx Laboratories,Health Care
+INTC,Intel,Technology
+INTU,Intuit,Technology
+ISRG,Intuitive Surgical,Health Care
+KDP,Keurig Dr Pepper,Consumer Staples
+KLAC,KLA Corporation,Technology
+KHC,Kraft Heinz,Consumer Staples
+LRCX,Lam Research,Technology
+LIN,Linde plc,Basic Materials
+LULU,Lululemon,Consumer Discretionary
+MAR,Marriott International,Consumer Discretionary
+MRVL,Marvell Technology,Technology
+MELI,Mercado Libre,Consumer Discretionary
+META,Meta Platforms,Technology
+MCHP,Microchip Technology,Technology
+MU,Micron Technology,Technology
+MSFT,Microsoft,Technology
+MSTR,MicroStrategy,Technology
+MDLZ,Mondelez International,Consumer Staples
+MNST,Monster Beverage,Consumer Staples
+NFLX,"Netflix, Inc.",Consumer Discretionary
+NVDA,Nvidia,Technology
+NXPI,NXP Semiconductors,Technology
+ORLY,O'Reilly Automotive,Consumer Discretionary
+ODFL,Old Dominion Freight Line,Industrials
+ON,Onsemi,Technology
+PCAR,Paccar,Consumer Discretionary
+PLTR,Palantir Technologies,Technology
+PANW,Palo Alto Networks,Technology
+PAYX,Paychex,Industrials
+PYPL,PayPal,Industrials
+PDD,PDD Holdings,Technology
+PEP,PepsiCo,Consumer Staples
+QCOM,Qualcomm,Technology
+REGN,Regeneron Pharmaceuticals,Health Care
+ROP,Roper Technologies,Technology
+ROST,Ross Stores,Consumer Discretionary
+SHOP,Shopify,Technology
+SOLS,Solstice Advanced Materials,Materials
+SBUX,Starbucks,Consumer Discretionary
+SNPS,Synopsys,Technology
+TMUS,T-Mobile US,Telecommunications
+TTWO,Take-Two Interactive,Consumer Discretionary
+TSLA,"Tesla, Inc.",Consumer Discretionary
+TXN,Texas Instruments,Technology
+TRI,Thomson Reuters,Technology
+TTD,Trade Desk (The),Technology
+VRSK,Verisk Analytics,Industrials
+VRTX,Vertex Pharmaceuticals,Health Care
+WBD,Warner Bros. Discovery,Consumer Discretionary
+WDAY,"Workday, Inc.",Technology
+XEL,Xcel Energy,Utilities
+ZS,Zscaler,Technology
