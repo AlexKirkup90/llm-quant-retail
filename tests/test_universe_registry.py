@@ -16,19 +16,22 @@ def test_registry_known_universes():
 
 def test_parse_snapshots_offline():
     snapshots = {
-        "SP500_FULL": universe_registry.fetch_sp500_full(
-            SNAPSHOT_DIR / "sp500_wikipedia.html"
-        ),
-        "NASDAQ_100": universe_registry.fetch_nasdaq_100(
-            SNAPSHOT_DIR / "nasdaq100_wikipedia.html"
-        ),
-        "FTSE_350": universe_registry.fetch_ftse_350(
+        "SP500_FULL": universe_registry.WikipediaProvider(
+            url="https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
+            universe_name="SP500_FULL",
+        ).fetch(SNAPSHOT_DIR / "sp500_wikipedia.html"),
+        "NASDAQ_100": universe_registry.WikipediaProvider(
+            url="https://en.wikipedia.org/wiki/NASDAQ-100",
+            universe_name="NASDAQ_100",
+        ).fetch(SNAPSHOT_DIR / "nasdaq100_wikipedia.html"),
+        "FTSE_350": universe_registry.FTSE350Provider().fetch(
             html_path_100=SNAPSHOT_DIR / "ftse100_wikipedia.html",
             html_path_250=SNAPSHOT_DIR / "ftse250_wikipedia.html",
         ),
-        "R1000": universe_registry.fetch_r1000(
-            SNAPSHOT_DIR / "r1000_wikipedia.html"
-        ),
+        "R1000": universe_registry.WikipediaProvider(
+            url="https://en.wikipedia.org/wiki/Russell_1000_Index",
+            universe_name="R1000",
+        ).fetch(SNAPSHOT_DIR / "r1000_wikipedia.html"),
     }
 
     for name, frame in snapshots.items():
@@ -41,7 +44,7 @@ def test_parse_snapshots_offline():
 
 
 def test_ftse350_composite_offline():
-    df = universe_registry.fetch_ftse_350(
+    df = universe_registry.FTSE350Provider().fetch(
         html_path_100=SNAPSHOT_DIR / "ftse100_wikipedia.html",
         html_path_250=SNAPSHOT_DIR / "ftse250_wikipedia.html",
     )
@@ -54,7 +57,7 @@ def test_ftse350_composite_offline():
 
 
 def test_ftse_suffixed_and_string_types():
-    df = universe_registry.fetch_ftse_350(
+    df = universe_registry.FTSE350Provider().fetch(
         html_path_100=SNAPSHOT_DIR / "ftse100_wikipedia.html",
         html_path_250=SNAPSHOT_DIR / "ftse250_wikipedia.html",
     )
@@ -131,7 +134,10 @@ def test_provider_handles_integer_headers(tmp_path):
     html_path = tmp_path / "nasdaq_inline.html"
     html_path.write_text(html, encoding="utf-8")
 
-    df = universe_registry.fetch_nasdaq_100(html_path)
+    df = universe_registry.WikipediaProvider(
+        url="https://en.wikipedia.org/wiki/NASDAQ-100",
+        universe_name="NASDAQ_100",
+    ).fetch(html_path)
 
     assert list(df.columns) == ["symbol", "name", "sector"]
     assert df.loc[0, "symbol"] == "AAPL"
@@ -142,42 +148,44 @@ def test_refresh_writes_csvs(tmp_path, monkeypatch):
     monkeypatch.setattr(universe_registry, "REF_DIR", tmp_path)
 
     providers = {
-        "SP500_FULL": (universe_registry.fetch_sp500_full, "sp500_wikipedia.html"),
-        "R1000": (universe_registry.fetch_r1000, "r1000_wikipedia.html"),
-        "NASDAQ_100": (universe_registry.fetch_nasdaq_100, "nasdaq100_wikipedia.html"),
+        "SP500_FULL": ("sp500_wikipedia.html",),
+        "R1000": ("r1000_wikipedia.html",),
+        "NASDAQ_100": ("nasdaq100_wikipedia.html",),
         "FTSE_350": (
-            universe_registry.fetch_ftse_350,
-            ("ftse100_wikipedia.html", "ftse250_wikipedia.html"),
+            "ftse100_wikipedia.html",
+            "ftse250_wikipedia.html",
         ),
     }
 
-    for name, (fetcher, filename) in providers.items():
+    for name, filenames in providers.items():
+        provider = universe_registry._UNIVERSES[name].provider
         if name == "FTSE_350":
-            file_100, file_250 = filename
-
-            def _provider(
-                _html_path=None,
-                *,
-                func=fetcher,
-                path_100=SNAPSHOT_DIR / file_100,
-                path_250=SNAPSHOT_DIR / file_250,
-            ):
-                return func(html_path_100=path_100, html_path_250=path_250)
-
+            monkeypatch.setattr(
+                provider,
+                "fetch",
+                lambda **kwargs: pd.DataFrame(
+                    {
+                        "symbol": ["ABC.L", "DEF.L"],
+                        "name": ["ABC", "DEF"],
+                        "sector": ["GEN", "GEN"],
+                    }
+                ),
+            )
         else:
-            snapshot_file = SNAPSHOT_DIR / filename
+            monkeypatch.setattr(
+                provider,
+                "fetch",
+                lambda **kwargs: pd.DataFrame(
+                    {
+                        "symbol": ["GHI", "JKL"],
+                        "name": ["GHI", "JKL"],
+                        "sector": ["GEN", "GEN"],
+                    }
+                ),
+            )
 
-            def _provider(_html_path=None, *, path=snapshot_file, func=fetcher):
-                return func(path)
-
-        monkeypatch.setattr(
-            universe_registry._UNIVERSES[name],  # type: ignore[attr-defined]
-            "provider",
-            _provider,
-            raising=False,
-        )
         df, source = universe_registry.refresh_universe(name, force=True)
         assert source == "live"
         assert not df.empty
-        expected_path = tmp_path / universe_registry._UNIVERSES[name].csv_filename  # type: ignore[attr-defined]
+        expected_path = tmp_path / universe_registry._UNIVERSES[name].csv_filename
         assert expected_path.exists()

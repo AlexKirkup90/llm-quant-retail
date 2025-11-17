@@ -28,6 +28,34 @@ requests.packages.urllib3.disable_warnings(category=InsecureRequestWarning)  # t
 ProviderFn = Callable[[Optional[Path]], DataFrame]
 
 
+class UniverseProvider:
+    def __init__(self, name: str):
+        self.name = name
+
+    def fetch(self, html_path: Optional[Path] = None) -> DataFrame:
+        raise NotImplementedError
+
+    def validate(self, df: DataFrame) -> DataFrame:
+        if df.empty:
+            raise ValueError(f"{self.name} provider returned an empty DataFrame")
+
+        min_constituents = expected_min_constituents(self.name)
+        if len(df) < min_constituents:
+            LOGGER.warning(
+                f"{self.name} provider returned {len(df)} constituents, "
+                f"which is less than the expected {min_constituents}"
+            )
+
+        required_columns = {"symbol", "name", "sector"}
+        missing_columns = required_columns - set(df.columns)
+        if missing_columns:
+            raise ValueError(
+                f"{self.name} provider is missing required columns: {missing_columns}"
+            )
+
+        return df
+
+
 def _build_session() -> requests.Session:
     session = requests.Session()
     session.headers.update(
@@ -54,7 +82,7 @@ class UniverseDefinition:
     name: str
     url: str
     csv_filename: str
-    provider: Optional[ProviderFn]
+    provider: Optional[UniverseProvider]
     refresh_days: int = 90
 
     @property
@@ -371,31 +399,18 @@ def _extract_symbol_table(url: str, html_path: Optional[Path]) -> DataFrame:
     return best
 
 
-def fetch_sp500_full(html_path: Optional[Path] = None) -> DataFrame:
-    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-    try:
-        table = _extract_symbol_table(url, html_path)
-        return _normalize_universe_df(table, "SP500_FULL")
-    except ValueError as exc:
-        raise ValueError(f"SP500_FULL provider failed: {exc}") from exc
+class WikipediaProvider(UniverseProvider):
+    def __init__(self, url: str, universe_name: str):
+        super().__init__(universe_name)
+        self.url = url
 
-
-def fetch_nasdaq_100(html_path: Optional[Path] = None) -> DataFrame:
-    url = "https://en.wikipedia.org/wiki/NASDAQ-100"
-    try:
-        table = _extract_symbol_table(url, html_path)
-        return _normalize_universe_df(table, "NASDAQ_100")
-    except ValueError as exc:
-        raise ValueError(f"NASDAQ_100 provider failed: {exc}") from exc
-
-
-def fetch_r1000(html_path: Optional[Path] = None) -> DataFrame:
-    url = "https://en.wikipedia.org/wiki/Russell_1000_Index"
-    try:
-        table = _extract_symbol_table(url, html_path)
-        return _normalize_universe_df(table, "R1000")
-    except ValueError as exc:
-        raise ValueError(f"R1000 provider failed: {exc}") from exc
+    def fetch(self, html_path: Optional[Path] = None) -> DataFrame:
+        try:
+            table = _extract_symbol_table(self.url, html_path)
+            df = _normalize_universe_df(table, self.name)
+            return self.validate(df)
+        except ValueError as exc:
+            raise ValueError(f"{self.name} provider failed: {exc}") from exc
 
 
 def _extract_largest_symbol_table(url: str, html_path: Optional[Path]) -> DataFrame:
@@ -416,50 +431,55 @@ def _fetch_ftse_component(
     return _normalize_universe_df(table, "FTSE_350")
 
 
-def fetch_ftse_350(
-    html_path: Optional[Path] = None,
-    *,
-    html_path_100: Optional[Path] = None,
-    html_path_250: Optional[Path] = None,
-) -> DataFrame:
-    url_100 = "https://en.wikipedia.org/wiki/FTSE_100_Index"
-    url_250 = "https://en.wikipedia.org/wiki/FTSE_250_Index"
+class FTSE350Provider(UniverseProvider):
+    def __init__(self):
+        super().__init__("FTSE_350")
 
-    if html_path is not None and html_path_100 is None and html_path_250 is None:
-        # Backwards compatibility with combined snapshot tests.
-        try:
-            tables = _extract_symbol_tables(
-                "https://en.wikipedia.org/wiki/FTSE_350_Index", html_path
-            )
-            normalized = [_normalize_universe_df(table, "FTSE_350") for table in tables]
-            combined = pd.concat(normalized, ignore_index=True)
-            combined = combined.drop_duplicates(subset="symbol", keep="first")
-            return combined.reset_index(drop=True)
-        except ValueError as exc:
-            raise ValueError(f"FTSE_350 provider failed: {exc}") from exc
+    def fetch(
+        self,
+        html_path: Optional[Path] = None,
+        *,
+        html_path_100: Optional[Path] = None,
+        html_path_250: Optional[Path] = None,
+    ) -> DataFrame:
+        url_100 = "https://en.wikipedia.org/wiki/FTSE_100_Index"
+        url_250 = "https://en.wikipedia.org/wiki/FTSE_250_Index"
 
-    errors: List[str] = []
-    frames: List[DataFrame] = []
-    components = [
-        ("FTSE 100", url_100, html_path_100),
-        ("FTSE 250", url_250, html_path_250),
-    ]
+        if html_path is not None and html_path_100 is None and html_path_250 is None:
+            # Backwards compatibility with combined snapshot tests.
+            try:
+                tables = _extract_symbol_tables(
+                    "https://en.wikipedia.org/wiki/FTSE_350_Index", html_path
+                )
+                normalized = [_normalize_universe_df(table, "FTSE_350") for table in tables]
+                combined = pd.concat(normalized, ignore_index=True)
+                combined = combined.drop_duplicates(subset="symbol", keep="first")
+                return self.validate(combined.reset_index(drop=True))
+            except ValueError as exc:
+                raise ValueError(f"FTSE_350 provider failed: {exc}") from exc
 
-    for label, url, path in components:
-        try:
-            frame = _fetch_ftse_component(url, path, label)
-        except ValueError as exc:
-            errors.append(str(exc))
-        else:
-            frames.append(frame)
+        errors: List[str] = []
+        frames: List[DataFrame] = []
+        components = [
+            ("FTSE 100", url_100, html_path_100),
+            ("FTSE 250", url_250, html_path_250),
+        ]
 
-    if errors:
-        joined = "; ".join(errors)
-        raise ValueError(f"FTSE_350 provider failed: {joined}")
+        for label, url, path in components:
+            try:
+                frame = _fetch_ftse_component(url, path, label)
+            except ValueError as exc:
+                errors.append(str(exc))
+            else:
+                frames.append(frame)
 
-    combined = pd.concat(frames, ignore_index=True)
-    combined = combined.drop_duplicates(subset="symbol", keep="first")
-    return combined.reset_index(drop=True)[["symbol", "name", "sector"]]
+        if errors:
+            joined = "; ".join(errors)
+            raise ValueError(f"FTSE_350 provider failed: {joined}")
+
+        combined = pd.concat(frames, ignore_index=True)
+        combined = combined.drop_duplicates(subset="symbol", keep="first")
+        return self.validate(combined.reset_index(drop=True)[["symbol", "name", "sector"]])
 
 
 _UNIVERSES: Dict[str, UniverseDefinition] = {
@@ -467,28 +487,37 @@ _UNIVERSES: Dict[str, UniverseDefinition] = {
         name="SP500_FULL",
         url="https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
         csv_filename="sp500_full.csv",
-        provider=fetch_sp500_full,
+        provider=WikipediaProvider(
+            url="https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
+            universe_name="SP500_FULL",
+        ),
         refresh_days=90,
     ),
     "R1000": UniverseDefinition(
         name="R1000",
         url="https://en.wikipedia.org/wiki/Russell_1000_Index",
         csv_filename="r1000.csv",
-        provider=fetch_r1000,
+        provider=WikipediaProvider(
+            url="https://en.wikipedia.org/wiki/Russell_1000_Index",
+            universe_name="R1000",
+        ),
         refresh_days=90,
     ),
     "NASDAQ_100": UniverseDefinition(
         name="NASDAQ_100",
         url="https://en.wikipedia.org/wiki/NASDAQ-100",
         csv_filename="nasdaq_100.csv",
-        provider=fetch_nasdaq_100,
+        provider=WikipediaProvider(
+            url="https://en.wikipedia.org/wiki/NASDAQ-100",
+            universe_name="NASDAQ_100",
+        ),
         refresh_days=60,
     ),
     "FTSE_350": UniverseDefinition(
         name="FTSE_350",
         url="https://en.wikipedia.org/wiki/FTSE_350_Index",
         csv_filename="ftse_350.csv",
-        provider=fetch_ftse_350,
+        provider=FTSE350Provider(),
         refresh_days=60,
     ),
     "SP500_MINI": UniverseDefinition(
@@ -559,10 +588,10 @@ def refresh_universe(name: str, force: bool = False) -> Tuple[DataFrame, str]:
     needs_refresh = _should_refresh(definition, force)
     if needs_refresh:
         try:
-            df = definition.provider(None)
+            df = definition.provider.fetch()
             df = _write_csv(definition, df)
             return df, "live"
-        except ValueError as exc:
+        except (ValueError, AttributeError) as exc:
             LOGGER.warning("Live refresh failed for %s: %s", name, exc)
             try:
                 cached = _load_csv(definition)
