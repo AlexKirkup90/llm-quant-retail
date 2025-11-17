@@ -8,9 +8,14 @@ consistent between runs without requiring external data access.
 from __future__ import annotations
 
 import hashlib
+import json
+from pathlib import Path
 from typing import Iterable
 
 import pandas as pd
+import yfinance as yf
+
+from .config import CACHE_DIR
 
 _SECTORS = [
     "TECH",
@@ -36,7 +41,24 @@ def load(symbols: Iterable[str]) -> pd.DataFrame:
     fabricated but stable so downstream signals are repeatable in tests.
     """
 
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    pe_cache_path = CACHE_DIR / "pe_ratios.json"
+    pe_ratios = {}
+    if pe_cache_path.exists():
+        with open(pe_cache_path, "r") as f:
+            pe_ratios = json.load(f)
+
     rows = []
+    symbols_to_fetch = [s for s in symbols if s not in pe_ratios]
+    if symbols_to_fetch:
+        for sym in symbols_to_fetch:
+            try:
+                pe_ratios[sym] = yf.Ticker(sym).info.get("trailingPE")
+            except Exception:
+                pe_ratios[sym] = None
+        with open(pe_cache_path, "w") as f:
+            json.dump(pe_ratios, f)
+
     for sym in symbols:
         if sym is None:
             continue
@@ -60,13 +82,14 @@ def load(symbols: Iterable[str]) -> pd.DataFrame:
                 "eps_rev_3m": eps_change,
                 "avg_dollar_vol_30d": float(avg_dollar_vol),
                 "earnings_vol_90d": round(earnings_vol, 6),
+                "pe_ratio": pe_ratios.get(sym),
             }
         )
 
     if not rows:
-        return pd.DataFrame(columns=["sector", "eps_rev_3m", "avg_dollar_vol_30d", "earnings_vol_90d"]).set_index(
-            pd.Index([], name="symbol")
-        )
+        return pd.DataFrame(
+            columns=["sector", "eps_rev_3m", "avg_dollar_vol_30d", "earnings_vol_90d", "pe_ratio"]
+        ).set_index(pd.Index([], name="symbol"))
 
     return pd.DataFrame(rows).set_index("symbol")
 

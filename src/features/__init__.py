@@ -16,6 +16,10 @@ def momentum_6m(prices: pd.DataFrame) -> pd.Series:
     return prices.pct_change(126).iloc[-1].rename("mom_6m")
 
 
+def momentum_12m(prices: pd.DataFrame) -> pd.Series:
+    return prices.pct_change(252).iloc[-1].rename("mom_12m")
+
+
 def beta_252d(prices: pd.DataFrame, bench_col: str = "SPY") -> pd.Series:
     # Simple market beta via covariance of daily returns
     rets = prices.pct_change().dropna()
@@ -118,6 +122,7 @@ def combine_features(
     """Aggregate price, fundamental, and sentiment features."""
     blocks = [
         momentum_6m(prices),
+        momentum_12m(prices),
         beta_252d(prices, bench_col="SPY"),
     ]
     if fundamentals is not None and not fundamentals.empty:
