@@ -32,7 +32,7 @@
 
 ## 1. Market Analysis, Data Collection, and Cleaning
 
-*   **Diversify Data Sources:** Integrate with additional data providers to reduce reliance on a single source and improve the quality and reliability of market data.
+*   **Diversify Data Sources:** Integrate with additional data providers to reduce reliance on a single source and improve the quality and reliability of market data. (Note: After investigation, it was determined that finding a reliable, free API for index constituents is challenging. The current implementation, which scrapes data from Wikipedia, is a functional workaround.)
 *   **Implement a Data Quality Assurance Framework:** Develop a systematic approach to data quality assurance, including data validation, cleaning, and normalization.
 *   **Introduce a Data Source Abstraction Layer:** Create a data source abstraction layer to decouple the data loading and parsing logic from the rest of the application, making it easier to add new data sources in the future.
 
