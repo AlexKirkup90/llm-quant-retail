@@ -194,6 +194,38 @@ class AlphaVantageProvider(UniverseProvider):
             raise ValueError(f"{self.name} provider failed: {exc}") from exc
 
 
+def _load_alpha_vantage_api_key() -> str:
+    for env_var in ("ALPHA_VANTAGE_API_KEY", "ALPHAVANTAGE_API_KEY"):
+        api_key = os.environ.get(env_var, "")
+        if api_key:
+            return api_key
+
+    secrets_path = Path(__file__).resolve().parent.parent / "spec" / "secrets.json"
+    if secrets_path.exists():
+        try:
+            secrets = json.loads(secrets_path.read_text())
+            if isinstance(secrets, dict):
+                api_key = secrets.get("ALPHA_VANTAGE_API_KEY") or secrets.get(
+                    "ALPHAVANTAGE_API_KEY"
+                )
+                if api_key:
+                    return str(api_key)
+        except Exception:
+            LOGGER.warning("Failed to read Alpha Vantage key from spec/secrets.json")
+
+    return ""
+
+
+def _maybe_build_alpha_vantage_provider() -> Optional[AlphaVantageProvider]:
+    api_key = _load_alpha_vantage_api_key()
+    if api_key:
+        return AlphaVantageProvider(api_key=api_key)
+    LOGGER.warning(
+        "US_STOCKS provider disabled: set ALPHA_VANTAGE_API_KEY or spec/secrets.json to enable refreshes."
+    )
+    return None
+
+
 def _read_html(url: str, html_path: Optional[Path]) -> List[DataFrame]:
     def _read_from_text(text: str) -> List[DataFrame]:
         for flavor in ("lxml", "bs4"):
@@ -552,7 +584,7 @@ _UNIVERSES: Dict[str, UniverseDefinition] = {
         name="US_STOCKS",
         url="",
         csv_filename="us_stocks.csv",
-        provider=AlphaVantageProvider(api_key=os.environ.get("ALPHA_VANTAGE_API_KEY", "")),
+        provider=_maybe_build_alpha_vantage_provider(),
         refresh_days=30,
     ),
 }
