@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 
 from .config import RUNS_DIR
+from . import memory
 
 
 LOGGER = logging.getLogger(__name__)
@@ -315,3 +316,66 @@ def calculate_sector_attribution(weights: pd.DataFrame, returns: pd.DataFrame, s
 
     attribution = Attribution(weights, returns, sector_map)
     return attribution.sector_attribution
+
+
+def monthly_assessment(
+    net_returns: pd.Series,
+    bench_returns: pd.Series,
+    turnover: pd.Series,
+    costs: pd.Series,
+    *,
+    universe: str = "SP500",
+    metrics_history_path: Path | None = None,
+) -> List[Dict[str, object]]:
+    """Compute month-end metrics and append them to metrics_history.json.
+
+    The helper resamples daily series to month-end, computes a performance
+    summary for each completed month, and persists the records for downstream
+    universe selection and telemetry.
+    """
+
+    metrics_history_path = metrics_history_path or memory.MEM_PATH
+
+    net = pd.Series(net_returns).dropna()
+    bench = pd.Series(bench_returns).reindex(net.index).fillna(0.0)
+    turn = pd.Series(turnover).reindex(net.index).fillna(0.0)
+    c = pd.Series(costs).reindex(net.index).fillna(0.0)
+
+    if net.empty:
+        return []
+
+    grouped = net.resample("M")
+    records: List[Dict[str, object]] = []
+    for date, monthly_rets in grouped:
+        if monthly_rets.empty:
+            continue
+        idx = monthly_rets.index
+        bench_slice = bench.reindex(idx).fillna(0.0)
+        turn_slice = turn.reindex(idx).fillna(0.0)
+        cost_slice = c.reindex(idx).fillna(0.0)
+        perf = performance_summary(monthly_rets, bench_slice, turn_slice, cost_slice)
+        val = val_metrics(monthly_rets, bench_slice)
+        record = {
+            "date": date.strftime("%Y-%m-%d"),
+            "universe": universe,
+            **perf,
+            **val,
+        }
+        memory.append_metrics(record)
+        records.append(record)
+
+    if records and metrics_history_path != memory.MEM_PATH:
+        try:
+            existing = []
+            if metrics_history_path.exists():
+                raw = json.loads(metrics_history_path.read_text())
+                if isinstance(raw, list):
+                    existing = raw
+            metrics_history_path.parent.mkdir(parents=True, exist_ok=True)
+            metrics_history_path.write_text(
+                json.dumps(existing + records, indent=2, sort_keys=True)
+            )
+        except Exception:
+            LOGGER.warning("Failed to persist monthly metrics", exc_info=True)
+
+    return records
