@@ -129,6 +129,8 @@ def compute_universe_metrics(
     return metrics_df
 
 
+import xgboost as xgb
+
 def score_universes(
     metrics_df: pd.DataFrame, weights: Mapping[str, float], temperature: float
 ) -> Tuple[pd.Series, pd.Series]:
@@ -138,17 +140,24 @@ def score_universes(
         return pd.Series(dtype=float), pd.Series(dtype=float)
 
     df = _ensure_columns(metrics_df.copy(), _METRIC_COLUMNS)
+    df = df.fillna(0)
 
-    def _w(key: str) -> float:
-        return float(weights.get(key, 0.0)) if isinstance(weights, Mapping) else 0.0
-
-    scores = (
-        _w("alpha") * df["alpha"].fillna(0.0)
-        + _w("sortino") * df["sortino"].fillna(0.0)
-        - _w("mdd") * df["mdd"].fillna(0.0)
-        + _w("coverage") * df["coverage"].fillna(0.0)
-        - _w("turnover") * df["turnover_cost"].fillna(0.0)
+    X = df[_METRIC_COLUMNS]
+    y = (
+        weights.get("alpha", 0.0) * df["alpha"] +
+        weights.get("sortino", 0.0) * df["sortino"] -
+        weights.get("mdd", 0.0) * df["mdd"] +
+        weights.get("coverage", 0.0) * df["coverage"] -
+        weights.get("turnover", 0.0) * df["turnover_cost"]
     )
+
+    model = xgb.XGBRegressor()
+
+    if len(X) > 1:
+        model.fit(X, y)
+        scores = pd.Series(model.predict(X), index=df.index)
+    else:
+        scores = y
 
     temp = float(temperature or 0.0)
     if temp <= 0:
@@ -484,65 +493,29 @@ def choose_universe(
     ) = _bandit_settings(selection_cfg, bandit_enabled)
     bandit_info = {"active": False, "probabilities": {}, "posteriors": {}}
     if enabled:
-        if persistent_priors:
-            posteriors = {}
-            means_dict: Dict[str, float] = {}
-            counts_dict: Dict[str, float] = {}
-            for name in candidates:
-                alpha_post, beta_post = persistent_priors.get(name, (alpha_prior, beta_prior))
-                alpha_post = float(alpha_post)
-                beta_post = float(beta_post)
-                if alpha_post <= 0:
-                    alpha_post = alpha_prior
-                if beta_post <= 0:
-                    beta_post = beta_prior
-                total = alpha_post + beta_post
-                mean_val = float(alpha_post / total) if total > 0 else 0.0
-                observations = max(0.0, float(alpha_post + beta_post - 2.0))
-                successes = max(0.0, float(alpha_post - 1.0))
-                posteriors[name] = {
-                    "alpha": alpha_post,
-                    "beta": beta_post,
-                    "observations": int(round(observations)),
-                    "successes": int(round(successes)),
-                }
-                means_dict[name] = mean_val
-                counts_dict[name] = observations
-            means = pd.Series(means_dict)
-            counts = pd.Series(counts_dict)
-        else:
-            posteriors, means, counts = _compute_bandit_posteriors(
-                history_df, candidates, alpha_prior, beta_prior, persistent_priors
-            )
-        bandit_series = pd.Series(1.0, index=pd.Index(candidates, name="universe"), dtype=float)
+        posteriors, _, counts = _compute_bandit_posteriors(
+            history_df, candidates, alpha_prior, beta_prior, persistent_priors
+        )
         if posteriors:
             bandit_info["posteriors"] = {
                 name: {
-                    "alpha": float(stats["alpha"]),
-                    "beta": float(stats["beta"]),
-                    "observations": int(stats.get("observations", 0)),
-                    "successes": int(stats.get("successes", 0)),
+                    "alpha": stats["alpha"],
+                    "beta": stats["beta"],
+                    "observations": stats.get("observations", 0),
+                    "successes": stats.get("successes", 0),
                 }
                 for name, stats in posteriors.items()
             }
             bandit_active = len(counts) > 0 and counts.min() >= min_obs
-            bandit_series = means.reindex(probabilities.index).fillna(0.0)
-            if bandit_series.sum() <= 0:
-                bandit_series = pd.Series(1.0, index=bandit_series.index)
-            bandit_series = bandit_series / bandit_series.sum()
             if bandit_active:
                 bandit_info["active"] = True
-                combined = probabilities.fillna(0.0) * bandit_series
-                total = combined.sum()
-                if total <= 0:
-                    combined = bandit_series
-                    total = combined.sum()
-                probabilities = combined / total if total > 0 else bandit_series
-        bandit_series = bandit_series.reindex(probabilities.index).fillna(0.0)
-        total_bandit = bandit_series.sum()
-        if total_bandit > 0:
-            bandit_series = bandit_series / total_bandit
-        bandit_info["probabilities"] = bandit_series.to_dict()
+                samples = {
+                    name: np.random.beta(stats["alpha"], stats["beta"])
+                    for name, stats in posteriors.items()
+                }
+                best_universe = max(samples, key=samples.get)
+                probabilities = pd.Series(0.0, index=candidates)
+                probabilities[best_universe] = 1.0
         if posteriors:
             _persist_bandit_state(posteriors, bandit_info["active"])
 

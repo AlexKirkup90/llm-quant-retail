@@ -9,3 +9,7 @@ pytest
 requests
 lxml
 beautifulsoup4
+PyPortfolioOpt
+ffn
+gs-quant
+xgboost

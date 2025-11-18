@@ -806,6 +806,12 @@ def main():
 
                 st.subheader("Risk dashboard")
                 beta_col, vol_col, dd_col, scaler_col = st.columns(4)
+
+                if sector_lookup is not None:
+                    st.subheader("Sector Attribution")
+                    attribution_df = metrics.calculate_sector_attribution(pd.DataFrame({str(as_of): w_final}), returns_252, sector_lookup)
+                    st.dataframe(attribution_df)
+
                 beta_value = "n/a"
                 if pd.notna(portfolio_beta):
                     beta_value = f"{portfolio_beta:.2f}"
@@ -878,6 +884,10 @@ def main():
                         file_name=Path(out_path).name,
                         key=k("weekly", "dl_report"),
                     )
+
+                plot_path = str(Path(out_dir) / f"equity_curve_{ts}.png")
+                report.generate_equity_curve_plot(curve, plot_path)
+                st.image(plot_path, caption="Equity Curve")
 
                 val_metrics = metrics.val_metrics(port_rets, bench)
                 coverage_universe = len([sym for sym in symbols if sym != benchmark_symbol])

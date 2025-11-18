@@ -59,6 +59,9 @@ def apply_single_name_cap(weights: pd.Series, cap: float = 0.10) -> pd.Series:
     return (w / final_total).sort_values(ascending=False)
 
 
+import pandas as pd
+from pypfopt import EfficientFrontier, expected_returns, risk_models
+
 def inverse_vol_weights(
     returns_252: pd.DataFrame,
     tickers: list,
@@ -72,6 +75,28 @@ def inverse_vol_weights(
     w = inv / inv.sum()
     w = apply_single_name_cap(w, cap_single)
     return w
+
+
+import ffn
+
+def mean_variance_weights(prices: pd.DataFrame, cap_single: float = 0.10) -> pd.Series:
+    """Calculates portfolio weights using mean-variance optimization."""
+    mu = expected_returns.mean_historical_return(prices)
+    S = risk_models.sample_cov(prices)
+
+    ef = EfficientFrontier(mu, S)
+    ef.add_constraint(lambda w: w <= cap_single)
+    ef.max_sharpe()
+    weights = ef.clean_weights()
+    return pd.Series(weights)
+
+
+def calculate_momentum_score(prices: pd.DataFrame) -> pd.Series:
+    """Calculates a momentum score for each stock."""
+    returns = prices.to_returns().dropna()
+    stats = returns.calc_stats()
+    return stats.display('sharpe')
+
 
 def apply_sector_caps(weights: pd.Series, sector_map: pd.Series, cap: float = 0.35) -> pd.Series:
     w = weights.copy()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
@@ -170,7 +171,27 @@ def _ensure_schema(df: DataFrame, name: str) -> DataFrame:
 
 
 def registry_list() -> List[str]:
-    return ["SP500_MINI", "SP500_FULL", "R1000", "NASDAQ_100", "FTSE_350"]
+    return ["SP500_MINI", "SP500_FULL", "R1000", "NASDAQ_100", "FTSE_350", "US_STOCKS"]
+
+
+class AlphaVantageProvider(UniverseProvider):
+    def __init__(self, api_key: str):
+        super().__init__("US_STOCKS")
+        if not api_key:
+            raise ValueError("Alpha Vantage API key not provided.")
+        self.api_key = api_key
+
+    def fetch(self, html_path: Optional[Path] = None) -> DataFrame:
+        url = f"https://www.alphavantage.co/query?function=LISTING_STATUS&apikey={self.api_key}"
+        try:
+            response = _SESSION.get(url, timeout=30)
+            response.raise_for_status()
+            df = pd.read_csv(StringIO(response.text))
+            df = df.rename(columns={"name": "name", "symbol": "symbol"})
+            df["sector"] = ""  # Alpha Vantage does not provide sector info in this endpoint
+            return self.validate(df)
+        except (requests.RequestException, ValueError) as exc:
+            raise ValueError(f"{self.name} provider failed: {exc}") from exc
 
 
 def _read_html(url: str, html_path: Optional[Path]) -> List[DataFrame]:
@@ -526,6 +547,13 @@ _UNIVERSES: Dict[str, UniverseDefinition] = {
         csv_filename="sp500_mini.csv",
         provider=None,
         refresh_days=0,
+    ),
+    "US_STOCKS": UniverseDefinition(
+        name="US_STOCKS",
+        url="",
+        csv_filename="us_stocks.csv",
+        provider=AlphaVantageProvider(api_key=os.environ.get("ALPHA_VANTAGE_API_KEY", "")),
+        refresh_days=30,
     ),
 }
 

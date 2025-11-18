@@ -82,6 +82,7 @@ def _run_with_timeout(
 class BacktestConfig:
     universe: str
     spec_version: str
+    strategy: str = "inverse_vol"
     rebalance_frequency: str = "W-FRI"
     lookback_days: int = 252
     target_vol: Optional[float] = 0.15
@@ -97,7 +98,6 @@ class WalkForwardBacktester:
     def __init__(
         self,
         prices: pd.DataFrame,
-        strategy_fn: Callable[[pd.DataFrame], pd.Series],
         config: BacktestConfig,
         adv: Optional[pd.Series] = None,
         residual_fn: Optional[Callable[[pd.DataFrame, Optional[pd.Series]], pd.Series]] = None,
@@ -194,7 +194,16 @@ class WalkForwardBacktester:
                 continue
 
             try:
-                weights = self.strategy_fn(history_window)
+                if self.config.strategy == "mean_variance":
+                    weights = portfolio.mean_variance_weights(history_window)
+                elif self.config.strategy == "momentum":
+                    momentum_scores = portfolio.calculate_momentum_score(history_window)
+                    top_k = portfolio.select_dynamic_topk(momentum_scores)
+                    tickers = momentum_scores.nlargest(top_k).index
+                    weights = portfolio.inverse_vol_weights(history_window.pct_change(), tickers)
+                else:  # Default to inverse volatility
+                    weights = portfolio.inverse_vol_weights(history_window.pct_change(), history_window.columns)
+
                 if not isinstance(weights, pd.Series) or weights.empty:
                     continue
                 weights = weights.reindex(history_window.columns).fillna(0.0)
