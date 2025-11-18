@@ -20,6 +20,20 @@ available under `data/reference/ohlcv_latest.csv`. When the snapshot is missing
 or stale the app falls back to the raw constituent lists and surfaces an
 informational warning.
 
+### Alpha Vantage key
+
+The optional `US_STOCKS` universe uses the Alpha Vantage listings endpoint. Set
+an API key via either an environment variable or a private secrets file:
+
+```bash
+export ALPHA_VANTAGE_API_KEY="<your key>"
+# or create spec/secrets.json based on spec/secrets.example.json
+```
+
+The repository ignores `spec/secrets.json` and `.env` by default so you can keep
+your key out of version control. When no key is provided the US_STOCKS provider
+is disabled with a warning instead of raising at import time.
+
 To force-refresh everything locally run:
 
 ```bash

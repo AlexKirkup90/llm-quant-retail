@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
 
 from src.universe import ensure_universe_schema
 from src.universe_registry import (
+    UniverseRegistryError,
     load_universe_normalized,
     refresh_universe,
     registry_list,
@@ -423,6 +424,18 @@ def main():
                     uni = load_universe_normalized(
                         universe_name, apply_filters=bool(apply_filters)
                     )
+                except UniverseRegistryError:
+                    st.warning(
+                        f"Universe cache looked invalid; refreshing and retrying {universe_name}."
+                    )
+                    try:
+                        refresh_universe(universe_name, force=True)
+                        uni = load_universe_normalized(
+                            universe_name, apply_filters=bool(apply_filters)
+                        )
+                    except Exception as exc:  # pragma: no cover - runtime safety
+                        st.error(f"Failed to load {universe_name}: {exc}")
+                        st.stop()
                 except Exception as exc:
                     st.error(f"Failed to load {universe_name}: {exc}")
                     st.stop()
@@ -437,16 +450,7 @@ def main():
                         "filters_applied": False,
                     }
 
-                symbols = (
-                    uni["symbol"]
-                    .astype(str)
-                    .str.upper()
-                    .str.strip()
-                    .replace("", pd.NA)
-                    .dropna()
-                    .drop_duplicates()
-                    .tolist()
-                )
+                symbols = _resolve_symbols_from_universe(uni, universe_name)
                 sector_lookup = None
                 if "sector" in uni.columns:
                     with pd.option_context("mode.use_inf_as_na", True):
