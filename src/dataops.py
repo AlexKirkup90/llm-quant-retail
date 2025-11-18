@@ -1,7 +1,7 @@
 import hashlib
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, Sequence
+from typing import Dict, Mapping, Sequence
 
 import pandas as pd
 import yfinance as yf
@@ -71,6 +71,31 @@ def build_ohlcv_snapshot(universe: str, out_path: str) -> Dict[str, object]:
     return {"rows": int(rows), "cols": int(cols), "path": str(target)}
 
 
+def ensure_latest_ohlcv_snapshot(
+    *,
+    universe: str = "SP500_FULL",
+    years: int = 5,
+    out_path: Path | str | None = None,
+) -> Dict[str, object]:
+    """Guarantee an on-disk OHLCV snapshot, returning metadata.
+
+    When a snapshot is already present, its stats are returned. Otherwise the
+    function calls :func:`build_ohlcv_snapshot` using the provided universe and
+    persists the result to ``out_path`` or ``data/reference/ohlcv_latest.csv``.
+    """
+
+    existing = latest_ohlcv_snapshot_stats()
+    if existing:
+        return {"status": "existing", **existing}
+
+    dest = Path(out_path) if out_path is not None else OHLCV_LATEST_PATH
+    result = build_ohlcv_snapshot(universe, str(dest))
+    result["status"] = "created"
+    result["universe"] = universe
+    result["years"] = years
+    return result
+
+
 def load_latest_ohlcv_snapshot() -> pd.DataFrame:
     """Return the most recent OHLCV snapshot if available."""
 
@@ -118,6 +143,28 @@ def write_latest_ohlcv_snapshot(prices: pd.DataFrame) -> None:
         pass
 
 
+def warm_price_cache_from_snapshot(
+    snapshot: pd.DataFrame, name: str = "latest_prices", min_constituents: int = 50
+) -> Dict[str, object]:
+    """Persist a snapshot to the cache directory for faster warm starts."""
+
+    if snapshot is None or snapshot.empty:
+        return {"status": "skipped", "reason": "empty_snapshot"}
+    frame = snapshot.sort_index()
+    width = int(frame.shape[1]) if hasattr(frame, "shape") else 0
+    if width < min_constituents:
+        return {
+            "status": "skipped",
+            "reason": "insufficient_constituents",
+            "constituents": width,
+        }
+
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    out_path = CACHE_DIR / f"{name}.parquet"
+    frame.to_parquet(out_path)
+    return {"status": "cached", "path": str(out_path), "constituents": width}
+
+
 def latest_ohlcv_snapshot_stats() -> Dict[str, object]:
     """Return metadata describing the most recent OHLCV snapshot."""
 
@@ -136,6 +183,39 @@ def latest_ohlcv_snapshot_stats() -> Dict[str, object]:
         "cols": int(cols),
         "timestamp": modified,
         "path": str(OHLCV_LATEST_PATH),
+    }
+
+
+def data_healthchecks(spec: Mapping[str, object] | None = None) -> Dict[str, object]:
+    """Return a structured view of data readiness for the app.
+
+    The checks cover the latest OHLCV snapshot, universe coverage against that
+    snapshot, and whether a usable price parquet exists in the cache.
+    """
+
+    from . import universe_registry  # local import to avoid cycles
+
+    spec = spec or {}
+    adv_source = None
+    if isinstance(spec, Mapping):
+        adv_source = (spec.get("data") or {}).get("adv_source")
+    fallback_universe = (spec.get("universe") or {}).get("fallback", "SP500_MINI")
+
+    snapshot_meta = latest_ohlcv_snapshot_stats()
+    snapshot = load_latest_ohlcv_snapshot()
+    universe_frame = universe_registry.load_universe(fallback_universe)
+    symbols = universe_frame.get("symbol", pd.Series(dtype=str)).tolist() if isinstance(universe_frame, pd.DataFrame) else []
+    coverage = ohlcv_snapshot_coverage(snapshot, symbols)
+
+    warm_cache = has_warm_price_cache("latest_prices", min_constituents=max(len(symbols), 50))
+
+    return {
+        "adv_source": adv_source or str(OHLCV_LATEST_PATH),
+        "snapshot": snapshot_meta,
+        "coverage": coverage,
+        "fallback_universe": fallback_universe,
+        "symbols": len(symbols),
+        "price_cache_ready": warm_cache,
     }
 
 
