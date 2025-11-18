@@ -301,3 +301,17 @@ def load_ic_history(path: Path | None = None) -> pd.DataFrame:
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
         df = df.dropna(subset=["date"])
     return df.sort_values("date")
+
+
+def calculate_sector_attribution(weights: pd.DataFrame, returns: pd.DataFrame, sector_map: pd.Series) -> pd.DataFrame:
+    """Calculates sector attribution for a portfolio."""
+    from gs_quant.performance.attribution import Attribution
+
+    weights = weights.copy()
+    weights.index = pd.to_datetime(weights.index)
+
+    returns = returns.copy()
+    returns.index = pd.to_datetime(returns.index)
+
+    attribution = Attribution(weights, returns, sector_map)
+    return attribution.sector_attribution
