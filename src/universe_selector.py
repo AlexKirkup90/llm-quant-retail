@@ -129,67 +129,21 @@ def compute_universe_metrics(
     return metrics_df
 
 
-import xgboost as xgb
+from . import sentiment
 
 def score_universes(
-    metrics_df: pd.DataFrame, weights: Mapping[str, float], temperature: float
+    universe_names: List[str],
 ) -> Tuple[pd.Series, pd.Series]:
-    """Score universes and convert to a probability distribution."""
+    """Score universes based on momentum and convert to a probability distribution."""
 
-    if metrics_df is None or metrics_df.empty:
-        return pd.Series(dtype=float), pd.Series(dtype=float)
+    scores = sentiment.compute_universe_momentum_scores(universe_names)
+    scores_series = pd.Series(scores).fillna(0.0)
 
-    df = _ensure_columns(metrics_df.copy(), _METRIC_COLUMNS)
-    df = df.fillna(0)
+    # Softmax for probability distribution
+    exp_scores = np.exp(scores_series)
+    probabilities = exp_scores / np.sum(exp_scores)
 
-    X = df[_METRIC_COLUMNS]
-    y = (
-        weights.get("alpha", 0.0) * df["alpha"] +
-        weights.get("sortino", 0.0) * df["sortino"] -
-        weights.get("mdd", 0.0) * df["mdd"] +
-        weights.get("coverage", 0.0) * df["coverage"] -
-        weights.get("turnover", 0.0) * df["turnover_cost"]
-    )
-
-    model = xgb.XGBRegressor()
-
-    if len(X) > 1:
-        model.fit(X, y)
-        scores = pd.Series(model.predict(X), index=df.index)
-    else:
-        scores = y
-
-    temp = float(temperature or 0.0)
-    if temp <= 0:
-        temp = 1.0
-
-    k = adaptive_top_k(len(scores))
-    if 0 < k < len(scores):
-        filtered_scores = scores.nlargest(k)
-    else:
-        filtered_scores = scores
-
-    values = filtered_scores.to_numpy(dtype=float)
-    values = np.where(np.isfinite(values), values, 0.0)
-    if values.size == 0:
-        probabilities = np.array([], dtype=float)
-    else:
-        shifted = values / temp
-        shifted -= np.max(shifted) if shifted.size else 0.0
-        exps = np.exp(shifted)
-        total = float(exps.sum())
-        if total <= 0:
-            probabilities = np.full_like(exps, 1.0 / len(exps))
-        else:
-            probabilities = exps / total
-
-    probs_series = pd.Series(0.0, index=scores.index, dtype=float)
-    if probabilities.size:
-        probs_series.loc[filtered_scores.index] = probabilities
-    elif len(probs_series) > 0:
-        probs_series[:] = 1.0 / len(probs_series)
-
-    return scores.astype(float), probs_series
+    return scores_series, probabilities
 
 
 def _load_history(metrics_history_path: Path) -> pd.DataFrame:
@@ -263,184 +217,6 @@ def _compute_coverage(
     return coverage
 
 
-def _bandit_settings(
-    selection_cfg: Mapping[str, object] | None, override_enabled: Optional[bool]
-) -> Tuple[bool, float, float, int, Dict[str, Tuple[float, float]]]:
-    cfg = selection_cfg.get("bandit", {}) if isinstance(selection_cfg, Mapping) else {}
-    enabled = bool(cfg.get("enabled", False))
-    if override_enabled is not None:
-        enabled = bool(override_enabled)
-    alpha_prior = float(cfg.get("alpha_prior", 1.0))
-    beta_prior = float(cfg.get("beta_prior", 1.0))
-    min_obs = int(cfg.get("min_observations", cfg.get("min_weeks", 3)))
-    warm_priors = memory.load_bandit_posteriors()
-    return enabled, alpha_prior, beta_prior, max(1, min_obs), warm_priors
-
-
-def _compute_bandit_posteriors(
-    history_df: pd.DataFrame,
-    candidates: Iterable[str],
-    alpha_prior: float,
-    beta_prior: float,
-    warm_priors: Mapping[str, Tuple[float, float]] | None,
-) -> Tuple[Dict[str, Dict[str, float]], pd.Series, pd.Series]:
-    if history_df is None or history_df.empty or "net_alpha" not in history_df.columns:
-        empty = pd.Series(dtype=float)
-        return {}, empty, empty
-
-    posteriors: Dict[str, Dict[str, float]] = {}
-    means: Dict[str, float] = {}
-    counts: Dict[str, float] = {}
-
-    net_alpha = pd.to_numeric(history_df.get("net_alpha"), errors="coerce")
-    history_df = history_df.assign(net_alpha=net_alpha)
-
-    for name in candidates:
-        group = history_df.loc[history_df["universe"] == name, "net_alpha"].dropna()
-        observations = int(len(group))
-        successes = int((group > 0).sum())
-        failures = int(observations - successes)
-        prior_alpha, prior_beta = (warm_priors or {}).get(name, (alpha_prior, beta_prior))
-        prior_alpha = float(prior_alpha)
-        prior_beta = float(prior_beta)
-        if prior_alpha <= 0:
-            prior_alpha = alpha_prior
-        if prior_beta <= 0:
-            prior_beta = beta_prior
-        alpha_post = float(prior_alpha + successes)
-        beta_post = float(prior_beta + failures)
-        total = alpha_post + beta_post
-        mean = float(alpha_post / total) if total > 0 else 0.0
-        posteriors[name] = {
-            "alpha": alpha_post,
-            "beta": beta_post,
-            "observations": observations,
-            "successes": successes,
-        }
-        means[name] = mean
-        counts[name] = observations
-
-    return posteriors, pd.Series(means), pd.Series(counts)
-
-
-def _persist_bandit_state(posteriors: Dict[str, Dict[str, float]], active: bool) -> None:
-    path = RUNS_DIR / "universe_bandit.json"
-    payload = {
-        "updated_at": pd.Timestamp.utcnow().isoformat(),
-        "active": bool(active),
-        "posteriors": {
-            name: {key: float(value) for key, value in stats.items()} for name, stats in posteriors.items()
-        },
-    }
-    try:
-        path.write_text(json.dumps(payload, indent=2, sort_keys=True))
-    except Exception:  # pragma: no cover - disk issues should not break selection
-        pass
-
-
-def _resolve_bandit_reward_mode(spec: Mapping[str, object] | None) -> str:
-    if not isinstance(spec, Mapping):
-        return "alpha"
-    cfg = spec.get("bandit") if isinstance(spec.get("bandit"), Mapping) else {}
-    if isinstance(cfg, Mapping):
-        mode = str(cfg.get("reward", "alpha")).lower()
-        if mode in {"alpha", "alpha_sortino"}:
-            return mode
-    return "alpha"
-
-
-def _sortino_z_score(universe: str, current_sortino: float | None, window: int = 12) -> float:
-    if current_sortino is None or not np.isfinite(current_sortino):
-        return 0.0
-    history = memory.load_bandit_trace(limit=200)
-    values: List[float] = []
-    for record in history:
-        if record.get("choice") != universe:
-            continue
-        rewards = record.get("rewards") if isinstance(record.get("rewards"), Mapping) else {}
-        if not isinstance(rewards, Mapping):
-            continue
-        value = rewards.get("sortino")
-        try:
-            value_f = float(value)
-        except (TypeError, ValueError):
-            continue
-        values.append(value_f)
-    if not values:
-        return 0.0
-    tail = values[-window:]
-    arr = np.array(tail, dtype=float)
-    if arr.size < 2:
-        return 0.0
-    std = float(arr.std(ddof=0))
-    if std <= 1e-8 or not np.isfinite(std):
-        return 0.0
-    mean = float(arr.mean())
-    return float((float(current_sortino) - mean) / std)
-
-
-def update_bandit(
-    choice: str,
-    reward: Mapping[str, float] | None,
-    date: str | pd.Timestamp,
-    *,
-    spec: Mapping[str, object] | None = None,
-    universes: Iterable[str] | None = None,
-) -> Dict[str, Tuple[float, float]]:
-    """Update the persistent bandit trace with a new observation."""
-
-    reward = reward or {}
-    try:
-        alpha_val = float(reward.get("alpha", 0.0))
-    except (TypeError, ValueError):
-        alpha_val = 0.0
-    sortino_raw = reward.get("sortino")
-    try:
-        sortino_val = float(sortino_raw)
-    except (TypeError, ValueError):
-        sortino_val = float("nan")
-    mode = _resolve_bandit_reward_mode(spec)
-    sortino_z = 0.0
-    shaped = alpha_val
-    if mode == "alpha_sortino":
-        sortino_z = _sortino_z_score(str(choice), sortino_val)
-        shaped = 0.7 * alpha_val + 0.3 * sortino_z
-
-    success = shaped >= 0
-    current_posteriors = memory.load_bandit_posteriors()
-    base_names = set(current_posteriors.keys())
-    base_names.add(str(choice))
-    if universes is not None:
-        base_names.update(str(u) for u in universes)
-
-    updated: Dict[str, Tuple[float, float]] = {}
-    for name in sorted(base_names):
-        prior_alpha, prior_beta = current_posteriors.get(name, (1.0, 1.0))
-        alpha_post = float(prior_alpha)
-        beta_post = float(prior_beta)
-        if name == str(choice):
-            if success:
-                alpha_post += 1.0
-            else:
-                beta_post += 1.0
-        updated[name] = (alpha_post, beta_post)
-
-    record = {
-        "as_of": str(date),
-        "choice": str(choice),
-        "reward_mode": mode,
-        "rewards": {
-            "alpha": alpha_val,
-            "sortino": sortino_val if np.isfinite(sortino_val) else None,
-        },
-        "reward_value": shaped,
-        "sortino_z": sortino_z,
-        "posteriors": {name: [a, b] for name, (a, b) in updated.items()},
-    }
-    memory.append_bandit_trace(record)
-    return updated
-
-
 def choose_universe(
     candidates: List[str],
     constraints: Dict[str, object],
@@ -476,85 +252,10 @@ def choose_universe(
             metrics_df.at[name, "coverage"] = coverage_now.get(name, 0.0)
     metrics_df["turnover_cost"] = metrics_df["turnover_cost"].fillna(0.0)
 
-    scores, probabilities = score_universes(metrics_df, weights, temperature)
-    if scores.empty:
-        scores = pd.Series(0.0, index=pd.Index(candidates, name="universe"))
-        probabilities = pd.Series(
-            [1.0 / len(candidates)] * len(candidates),
-            index=pd.Index(candidates, name="universe"),
-        )
+    scores, probabilities = score_universes(candidates)
+    winner = probabilities.idxmax()
 
-    (
-        enabled,
-        alpha_prior,
-        beta_prior,
-        min_obs,
-        persistent_priors,
-    ) = _bandit_settings(selection_cfg, bandit_enabled)
-    bandit_info = {"active": False, "probabilities": {}, "posteriors": {}}
-    if enabled:
-        posteriors, _, counts = _compute_bandit_posteriors(
-            history_df, candidates, alpha_prior, beta_prior, persistent_priors
-        )
-        if posteriors:
-            bandit_info["posteriors"] = {
-                name: {
-                    "alpha": stats["alpha"],
-                    "beta": stats["beta"],
-                    "observations": stats.get("observations", 0),
-                    "successes": stats.get("successes", 0),
-                }
-                for name, stats in posteriors.items()
-            }
-            bandit_active = len(counts) > 0 and counts.min() >= min_obs
-            if bandit_active:
-                bandit_info["active"] = True
-                samples = {
-                    name: np.random.beta(stats["alpha"], stats["beta"])
-                    for name, stats in posteriors.items()
-                }
-                best_universe = max(samples, key=samples.get)
-                probabilities = pd.Series(0.0, index=candidates)
-                probabilities[best_universe] = 1.0
-        if posteriors:
-            _persist_bandit_state(posteriors, bandit_info["active"])
-
-    winner = str(probabilities.idxmax()) if not probabilities.empty else candidates[0]
-
-    row = metrics_df.loc[winner]
-    contributions = {
-        "alpha": float(weights.get("alpha", 0.0)) * float(row.get("alpha", 0.0)),
-        "sortino": float(weights.get("sortino", 0.0)) * float(row.get("sortino", 0.0)),
-        "mdd": -float(weights.get("mdd", 0.0)) * float(row.get("mdd", 0.0)),
-        "coverage": float(weights.get("coverage", 0.0)) * float(row.get("coverage", 0.0)),
-        "turnover": -float(weights.get("turnover", 0.0))
-        * float(row.get("turnover_cost", 0.0)),
-    }
-
-    driver_labels = {
-        "alpha": "alpha",
-        "sortino": "risk-adjusted returns",
-        "mdd": "drawdown control",
-        "coverage": "coverage",
-        "turnover": "turnover discipline",
-    }
-    driver_bits: List[str] = []
-    for key, value in sorted(contributions.items(), key=lambda kv: abs(kv[1]), reverse=True)[
-        :2
-    ]:
-        if value == 0:
-            continue
-        direction = "positive" if value > 0 else "negative"
-        driver_bits.append(f"{driver_labels.get(key, key)} ({direction} impact {value:.3f})")
-
-    rationale_parts = [f"Selected {winner}"]
-    if driver_bits:
-        rationale_parts.append("; ".join(driver_bits))
-    if float(row.get("n_weeks", 0.0)) < float(min_weeks):
-        rationale_parts.append(
-            f"history limited to {int(row.get('n_weeks', 0))} of required {min_weeks} weeks"
-        )
-    rationale = " — ".join(rationale_parts)
+    rationale = f"Selected {winner} based on momentum scores."
 
     decision = UniverseDecision(
         winner=winner,
@@ -596,5 +297,4 @@ def choose_universe(
         "parameters": decision.parameters,
         "lookback_weeks": decision.lookback_weeks,
         "min_weeks": decision.min_weeks,
-        "bandit": bandit_info,
     }
