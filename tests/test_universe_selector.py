@@ -83,28 +83,24 @@ def test_compute_universe_metrics_respects_lookback():
     assert metrics.loc["U2", "n_weeks"] == 2
 
 
-def test_score_universes_softmax_and_ranking():
-    metrics_df = pd.DataFrame(
-        {
-            "alpha": [0.12, 0.05, 0.03],
-            "sortino": [1.4, 1.1, 0.9],
-            "mdd": [0.12, 0.08, 0.2],
-            "coverage": [0.9, 0.6, 0.3],
-            "turnover_cost": [0.01, 0.02, 0.03],
-        },
-        index=["U1", "U2", "U3"],
+def test_score_universes_softmax_and_ranking(mocker):
+    mocker.patch(
+        "src.sentiment.compute_universe_momentum_scores",
+        return_value={"U1": 0.05, "U2": 0.02, "U3": -0.01},
     )
-    weights = {"alpha": 0.4, "sortino": 0.25, "mdd": 0.2, "coverage": 0.1, "turnover": 0.05}
 
-    scores, probs = score_universes(metrics_df, weights, temperature=0.7)
+    scores, probs = score_universes(["U1", "U2", "U3"])
 
     assert pytest.approx(probs.sum(), rel=1e-6) == 1.0
-    ordered = scores.sort_values(ascending=False).index.tolist()
-    assert ordered[0] == "U1"
+    assert probs.idxmax() == "U1"
     assert scores["U1"] > scores["U2"] > scores["U3"]
 
 
-def test_choose_universe_writes_log_and_returns_decision(tmp_path):
+def test_choose_universe_writes_log_and_returns_decision(tmp_path, mocker):
+    mocker.patch(
+        "src.sentiment.compute_universe_momentum_scores",
+        return_value={"U1": 0.05, "U2": 0.02, "U3": -0.01},
+    )
     history = _build_history()
     metrics_history_path = tmp_path / "metrics_history.json"
     metrics_history_path.write_text(history.to_json(orient="records"))
@@ -123,14 +119,6 @@ def test_choose_universe_writes_log_and_returns_decision(tmp_path):
         "universe_selection": {
             "lookback_weeks": 4,
             "min_weeks": 3,
-            "weights": {
-                "alpha": 0.4,
-                "sortino": 0.25,
-                "mdd": 0.2,
-                "coverage": 0.1,
-                "turnover": 0.05,
-            },
-            "temperature": 0.7,
             "constraints": {"min_constituents": {"U1": 10, "default": 8}},
             "logging": {"fields": ["as_of", "winner", "coverage_now"]},
         },
